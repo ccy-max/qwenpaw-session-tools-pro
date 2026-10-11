@@ -1,7 +1,7 @@
 {
   "id": "session-tools-pro",
   "name": "会话增强 Pro",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "type": "command",
   "description": "会话管理：/rewind /fork /regen /noreply + 气泡操作按钮（antd 内联确认、图标包图标、可撤销快照）",
   "author": "BOOS (forked from one-sixth/qwenpaw-plugin-session-tools 2.4.0)",

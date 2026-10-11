@@ -1,5 +1,10 @@
 # 更新日志
 
+## v3.0.2 (2026-10-11)
+- 修复：回退/删除/撤回后硬刷新仍可能残留旧气泡（宿主内存消息缓存活过 reload）
+  —— 新增 purgeMessageCache：刷新前经 React fiber 遍历找到宿主消息 store，
+  调 clearSessionMessages + setMessages([]) 清缓存后再 reload
+
 ## v3.0.1 (2026-10-11)
 - 新增 `scripts/build_release.py`：构建插件安装包 zip（plugin.json 置于包根，含 README.md / LICENSE / CHANGELOG.md）
 - 新增 GitHub Actions：推送 `v*` tag 自动构建 zip 并挂载到 Release

@@ -6,9 +6,11 @@
  * - emoji → @ant-design/icons（host.antdIcons）
  * - 所有按钮走 render 整体接管（宿主 Footer.Actions 对 item.render 只
  *   cloneElement(key)，不绑 onClick —— 点击行为完全由我们渲染的组件负责）
- * - 破坏性操作成功后硬刷新保证 DOM 同步（宿主对"切到当前会话"是
- *   no-op，软刷新不可靠）；回填输入框 / 撤销通知 / fork 后跳新会话
- *   这些意图经 sessionStorage 传递，刷新后由 restorePending 还原
+ * - 破坏性操作成功后：先从 React fiber 摸到宿主消息 store 清缓存
+ *   （purgeMessageCache，防旧气泡活过刷新），再硬刷新保证 DOM 与文件
+ *   同步（宿主对"切到当前会话"是 no-op，软刷新不可靠）；回填输入框 /
+ *   撤销通知 / fork 后跳新会话这些意图经 sessionStorage 传递，
+ *   刷新后由 restorePending 还原
  * - regen → 改为「撤回本轮并编辑」：后端删除该轮，原文回填输入框，
  *   由用户确认后手动发送 —— 删掉脆弱的 DOM 模拟发送（Enter+click）
  * - 不再依赖不存在的 window.currentUserId / currentChannel；
@@ -153,11 +155,66 @@
   var PENDING_KEY = GROUP + ".pending";
   var PENDING_TTL = 20000; // 20s 内有效，过期丢弃避免陈旧还原
 
+  /**
+   * 清掉宿主内存里的消息缓存（zustand messages store）。
+   *
+   * 背景：宿主把消息放在 React Context（含 setSessionMessages /
+   * clearSessionMessages），location.reload 前如果不清，某些场景下
+   * 内存里的旧气泡能活过刷新（用户实测：回退后"好的"残影）。
+   * 这里从 React 根 fiber 往下找携带 clearSessionMessages 的
+   * Provider value，找到就清当前会话 + 清全局视图，best-effort。
+   */
+  function purgeMessageCache(sessionId) {
+    try {
+      var rootEl = document.getElementById("root") || document.body.firstElementChild;
+      if (!rootEl) return false;
+      var key = Object.keys(rootEl).find(function (k) {
+        return k.indexOf("__reactContainer") === 0 || k.indexOf("__reactFiber") === 0;
+      });
+      if (!key) return false;
+
+      var purged = false;
+      var seen = 0;
+      (function walk(fiber) {
+        if (!fiber || seen++ > 4000 || purged) return;
+        var props = fiber.memoizedProps;
+        if (props && typeof props === "object") {
+          var v = props.value;
+          if (v && typeof v.clearSessionMessages === "function" &&
+              typeof v.setMessages === "function") {
+            try {
+              // 清每个已知会话的缓存 + 当前视图
+              v.clearSessionMessages(sessionId || "");
+              if (sessionId && typeof v.getSessionMessages === "function") {
+                // 某些实现 clear 需要逐会话调；把当前缓存里的 session 一并清
+                v.clearSessionMessages(undefined);
+              }
+              v.setMessages([]);
+              purged = true;
+            } catch (_) {}
+            return;
+          }
+        }
+        walk(fiber.child);
+        var sibling = fiber.sibling;
+        while (sibling && !purged) { walk(sibling); sibling = sibling.sibling; }
+      })(rootEl[key]);
+
+      if (DEBUG) console.log("[" + GROUP + "] purgeMessageCache:", purged);
+      return purged;
+    } catch (e) {
+      if (DEBUG) console.warn("[" + GROUP + "] purge failed:", e);
+      return false;
+    }
+  }
+
   function scheduleReload(payload) {
     try {
       payload.ts = Date.now();
       sessionStorage.setItem(PENDING_KEY, JSON.stringify(payload));
     } catch (_) {}
+    // 刷新前先清宿主内存消息缓存，防止旧气泡活过 reload
+    purgeMessageCache(payload && payload.sessionId);
     setTimeout(function () { window.location.reload(); }, 350);
   }
 
