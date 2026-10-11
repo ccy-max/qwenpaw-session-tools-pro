@@ -1,1 +1,0 @@
-qwenpaw plugin install D:\Data\github_repo\qwenpaw-plugin-session-tools --force

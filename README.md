@@ -127,11 +127,15 @@ qwenpaw plugin uninstall session-tools-pro
 
 ```
 session-tools-pro/
-├── plugin.json        # 插件元数据（id: session-tools-pro）
-├── plugin.py          # slash 命令 + HTTP API + 快照/undo 编排
-├── session_ops.py     # 核心：会话文件读写、消息定位、snapshot/restore
-└── frontend/
-    └── index.js       # 气泡按钮（render 整体接管）、通知撤销、跨刷新状态
+├── plugin.json        # 插件元数据（id: session-tools-pro，入口指向 backend/）
+├── backend/
+│   ├── plugin.py      # slash 命令 + HTTP API + 快照/undo 编排
+│   └── session_ops.py # 核心：会话文件读写、消息定位、snapshot/restore
+├── frontend/
+│   └── index.js       # 气泡按钮（render 整体接管）、通知撤销、跨刷新状态
+└── tests/
+    ├── conftest.py    # 把 backend/ 加入 sys.path
+    └── test_find_message.py
 ```
 
 ### 消息定位（三层兜底）
