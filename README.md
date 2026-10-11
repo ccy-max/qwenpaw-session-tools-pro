@@ -1,180 +1,239 @@
-# 🛠️ QwenPaw会话增强工具 (qwenpaw-plugin-session-tools)
+# ⚡ 会话增强 Pro (SessionToolsPro)
 
-为 QwenPaw 提供会话管理能力：**回退对话**、**分叉会话**、**重新生成回复**、**删除消息**、**静默记录**。
+> 会话管理增强插件（v3.0.0）｜插件 ID：`session-tools-pro`
+> 在 QwenPaw 会话里为**每条消息气泡**挂上「撤回 / 删除 / 回退 / 分叉」操作，并补齐 `/undo` 反悔能力——所有破坏性操作**先快照后写入**，误删一键还原，**零重启热安装**。
+>
+> - **本项目基于 [qwenpaw-plugin-session-tools](https://platform.agentscope.io/plugins/qwenpaw-plugin-session-tools)（作者 [one-sixth](https://github.com/one-sixth)，v2.4.0）增强二次开发**，保留原版全部能力，重写前端交互并加固数据安全性，差异见[版本更新摘要](#版本更新摘要)
+> - **适用版本**：QwenPaw 2.0.0 ~ 2.3.0
+> - **授权**：MIT（上游亦为 MIT，见 [LICENSE](LICENSE)）
 
-支持两种使用方式：
-- **WebUI 按钮**：在消息气泡下方显示操作按钮
-- **控制台命令**：通过 `/rewind`、`/fork`、`/regen`、`/noreply` 命令操作
+---
 
-## 📋 功能
+## 目录
 
-### WebUI 按钮
+- [功能特性](#功能特性)
+- [安装](#安装)
+- [卸载](#卸载)
+- [使用说明](#使用说明)
+- [控制台命令](#控制台命令)
+- [HTTP API](#http-api)
+- [架构与关键设计](#架构与关键设计)
+- [常见问题](#常见问题)
+- [版本更新摘要](#版本更新摘要)
+- [来源与致谢](#来源与致谢)
 
-| 按钮 | 用户消息 | 助手消息 | 说明 |
-|------|---------|---------|------|
-| ⏪ 回退 | ✅ | ❌ | 删除该消息及之后所有，文本填入输入框 |
-| 🍴 分叉 | ✅ | ✅ | 从该位置创建新会话 |
-| 🗑 删除 | ✅ | ✅ | 删该用户消息+对应助手回复（或仅用户消息若无回复） |
-| 🔄 重新生成 | ❌ | ✅ | 删除该轮并重新填入输入框发送 |
+---
 
-> 🔍📄 探查按钮默认隐藏，开启：`localStorage.setItem('SessionTools.debug', 'true')` 后刷新
+## 功能特性
 
-### 控制台命令
+### 核心能力
+
+| 能力 | 说明 |
+|------|------|
+| **快照安全网** | 每个破坏性操作（回退/删除/撤回/分叉源修改）写入前先快照会话文件，`/undo` 或通知里的「撤销」按钮一键还原 |
+| **并发防覆盖** | 写回前 `expect_count` 乐观校验：操作期间 agent 若追加了消息，中止写入返回 409，**绝不静默覆盖新消息** |
+| **轮次感知删除** | 点任意一条消息删**整轮**（用户提问 + 全部 assistant/system 工具链），不再只删"相邻一对" |
+| **撤回并编辑** | 删除本轮并把原提问回填输入框，改完手动发送——不替用户做主，不模拟点击 |
+| **分叉即跳转** | 从任意消息处复制出新会话（含到该消息的全部上下文），注册进会话列表并自动跳转 |
+| **三层定位兜底** | `original_id` 精确 → `created_at` 时间 → 文本前缀+角色，任一可用即可定位，按钮不罢工 |
+| **多 agent 感知** | 按请求解析 agent workspace，`user_id/channel` 缺省时自动扫描会话目录反查 |
+| **antd 原生 UI** | Popconfirm 内联确认、notification 结果通知、`@ant-design/icons` 图标，全部跟随宿主主题 |
+
+### 消息气泡按钮（用户与助手消息一致，顺序相同）
+
+| 按钮 | 图标 | 行为 | 可撤销 |
+|------|------|------|--------|
+| 撤回并编辑 | ↩ | 删除本轮（提问+回复），原文回填输入框 | ✅ |
+| 删除本轮 | 🗑 | 删除该消息所在整轮 | ✅ |
+| 回退 | ⏪ | 删除该消息**及之后**全部内容 | ✅ |
+| 分叉 | 🍴 | 从该消息（含）向前复制为新会话 | —（非破坏） |
+
+> 🔍📄 调试按钮（探测 ctx.data / 查看消息 JSON）默认隐藏，开启：`localStorage.setItem('SessionToolsPro.debug', 'true')` 后刷新。
+
+---
+
+## 安装
+
+```bash
+git clone https://github.com/ccy-max/qwenpaw-session-tools-pro.git
+qwenpaw plugin install ./qwenpaw-session-tools-pro --force
+```
+
+QwenPaw 运行中会**热加载**（无需重启）。装完**硬刷新控制台（Ctrl+Shift+R）**让前端脚本生效。
+
+验证：
+
+```bash
+qwenpaw plugin list   # 应看到 会话增强 Pro (v3.0.0)
+```
+
+> ⚠️ 若装过上游原版 `qwenpaw-plugin-session-tools`，**必须先卸载**再装本插件——两者 slash 命令（`/rewind` 等）与 HTTP 前缀重叠，共存会注册冲突。
+
+## 卸载
+
+```bash
+qwenpaw plugin uninstall session-tools-pro
+```
+
+> 快照目录 `sessions/.session-tools-pro-backups/` 卸载时不会自动删除，确认不再需要反悔后手动清理即可。
+
+---
+
+## 使用说明
+
+1. 硬刷新控制台，任意消息气泡下方出现 4 个操作图标
+2. 点击后弹 **Popconfirm 内联确认**（防误触），确认后执行
+3. 操作完成 → 页面自动刷新同步（宿主消息 store 为私有 React 状态，刷新是唯一可靠同步手段，见[常见问题](#常见问题)）
+4. 右下角通知带 **「撤销」按钮**：点一下即还原到操作前快照（12 秒内有效；过期可用 `/undo`）
+5. 撤回/回退后，本轮原提问已**回填输入框**，改完手动发送即可
+
+## 控制台命令
 
 | 命令 | 功能 | 说明 |
 |------|------|------|
-| `/rewind [N]` | ⏪ 回退 N 轮对话 | 删除最后 N 组用户+助手消息，默认 1 轮 |
-| `/fork [N]` | 🍴 分叉新会话 | 从 N 轮前分叉出新会话（默认 0=全部分叉） |
-| `/regen` | 🔄 重新生成回复 | 删掉最后一轮，让 AI 重新生成 |
-| `/noreply 消息` | 📝 静默记录 | 记录用户消息但不触发 AI 回复 |
+| `/rewind [N]` | 回退 N 轮对话 | 默认 1 轮，自动快照可 `/undo` |
+| `/fork [N]` | 分叉新会话 | 从 N 轮前分叉（默认 0 = 完整复制） |
+| `/regen` | 撤回本轮重发 | 删除最后一轮，原提问替换掉 `/regen` 继续发送 |
+| `/noreply 消息` | 静默记录 | 写入会话但不触发 AI 回复 |
+| `/undo [快照ID]` | **还原快照** | 缺省还原最近一份；可先查 `/session-tools/session/{id}/snapshots` |
 
-### 使用示例
-
-**WebUI**：
-- 点击用户消息的 ⏪ → 回退到该消息，文本填入输入框
-- 点击任意消息的 🍴 → 从该位置分叉新会话
-- 点击用户消息的 🗑 → 删除该用户消息+其助手回复（若无助手回复则仅删用户）
-- 点击助手消息的 🔄 → 删除该轮，自动填入并发送用户消息重新生成
-
-**控制台**：
 ```
 /rewind         → 回退 1 轮
-/rewind 3       → 回退 3 轮
-/fork           → 完整复制当前会话为新会话
-/fork 2         → 从 2 轮前分叉，保留最后 2 轮上下文
-/regen          → 重新生成上一条回复
-/noreply 收到   → 记录"收到"但不触发 AI 回复
+/fork 2         → 从 2 轮前分叉
+/noreply 收到   → 记录"收到"但不回复
+/undo           → 反悔上一次操作
 ```
 
-## 📦 安装
+## HTTP API
 
-```bash
-qwenpaw plugin install D:\Data\github_repo\qwenpaw-plugin-session-tools --force
+挂载于 `/api/session-tools/`（鉴权同宿主 API，带 `X-Agent-Id` 头）：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/session/{sid}/rewind` | 回退到定位消息处，返回 `rewound_message` + `undo_id` |
+| POST | `/session/{sid}/regen` | 撤回本轮，返回原提问 + `undo_id` |
+| POST | `/session/{sid}/fork` | 分叉，返回 `new_session_id` / `registered` |
+| DELETE | `/session/{sid}/message` | 轮次感知删除，返回 `deleted` + `undo_id` |
+| POST | `/session/{sid}/undo` | 还原快照（`snapshot_id` 缺省 = 最近一份） |
+| GET | `/session/{sid}/snapshots` | 列出快照 ID（新→旧） |
+| GET | `/session/{sid}/message` | 消息详情（调试用） |
+| GET | `/session/{sid}/info` | 会话统计 |
+
+定位参数三选一（按优先级）：`original_id` > `created_at` > `message_text`+`role`；`user_id`/`channel` 可省略。
+
+---
+
+## 架构与关键设计
+
+```
+session-tools-pro/
+├── plugin.json        # 插件元数据（id: session-tools-pro）
+├── plugin.py          # slash 命令 + HTTP API + 快照/undo 编排
+├── session_ops.py     # 核心：会话文件读写、消息定位、snapshot/restore
+└── frontend/
+    └── index.js       # 气泡按钮（render 整体接管）、通知撤销、跨刷新状态
 ```
 
-热安装后刷新页面（Ctrl+F5）生效。
-
-## 🏗️ 架构
-
-```
-session-tools/
-├── plugin.json        # 插件元数据
-├── plugin.py          # 入口文件：slash 命令 + HTTP API
-├── session_ops.py     # 核心操作：会话文件读写、消息查找
-├── frontend/
-│   └── index.js       # WebUI 前端：按钮注册、API 调用
-└── README.md          # 本文件
-```
-
-### 关键设计
-
-- **消息定位**：优先使用 `original_id`（UUID，对应 session 文件 `msg.id`）精确匹配，不可用时回退到 `created_at` 时间戳秒级模糊匹配
-- **Slash 命令**：通过 `register_slash_command()` 注册，返回 `Msg` 阻止 agent 继续，或返回 `None` 让 agent 继续处理
-- **HTTP API**：提供 RESTful API 供 WebUI 按钮调用
-- **会话操作**：`SessionOperator` 类封装会话文件读写，兼容新旧两种文件格式
-- **WebUI 按钮**：通过 `chat.requestActions.add()`（用户消息）和 `chat.actions.add()`（助手消息）注册，React state 驱动
-
-## ⚙️ 工作原理
-
-### 消息定位：`original_id` 优先，`created_at` 回退
-
-所有按钮优先使用 `ctx.data` 中的 `original_id` 精确匹配消息 UUID；旧版 QwenPaw 无 `original_id` 时回退到 `created_at`：
+### 消息定位（三层兜底）
 
 ```
 ctx.data.input[0].metadata.original_id  (用户气泡)  ┐
-ctx.data.output[0].metadata.original_id (助手气泡)  ┴→ 后端 find_message_by_id(msg_id=...)
-                                                    → 按 session 文件 msg.id 精确匹配
-ctx.data.created_at (Unix秒数 / ISO字符串)          ─→ 后端 find_message_by_created_at()
-                                                    → 统一转 Unix 秒数，先严格匹配（同一秒），再 ±1 秒宽松匹配
-多匹配时报 409 Conflict，未找到时报 404（提示刷新网页）
-→ 返回消息索引 + 消息对象
+ctx.data.output[0].metadata.original_id (助手气泡)  ┴→ ① msg.id 精确匹配
+ctx.data.created_at (Unix 秒)                        → ② 时间匹配（严格→±1s 容差）
+气泡渲染文本（截断 200 字符）+ role                   → ③ 前缀 50 字符 + 时间 + 邻居消歧
 ```
 
-**时区处理**：会话文件中的 `created_at` 是无时区本地时间（Asia/Shanghai），前端传参可能是 UTC 时间或 Unix 秒数。统一转成 Unix 秒数后比较，彻底绕开时区转换问题。
+第③层文本只取前 200 字符——后端本就只比对前 50 字符前缀，且整段长文本进 query string 会撑爆请求行（uvicorn 直接 400，见 v3.0.0 修复记录）。
 
-### WebUI 按钮
+### 快照与撤销
 
-#### ⏪ 回退
-```
-1. 取 ctx.data.created_at → 后端定位消息
-2. messages[:file_idx] 保留该消息之前
-3. 返回删掉的消息文本（填入输入框）
-4. 前端刷新页面
-```
+- 快照位置：`{workspace}/sessions/.session-tools-pro-backups/{channel}/{会话文件名}/{时间戳}-{操作名}.json`
+- 每个会话保留最近 **20** 份，超出自动修剪
+- 撤销本身也是一次写操作，会先做 `pre-restore` 快照——**撤销撤销操作**同样可恢复
 
-#### 🍴 分叉
-```
-1. 取 ctx.data.created_at → 后端定位消息
-2. messages[:file_idx+1] 保留到该消息（含）
-3. 创建新会话文件 + 注册到 chat_manager
-```
+### 并发防覆盖
 
-#### 🗑 删除
-```
-1. 取 ctx.data.created_at → 后端定位消息
-2. 用户消息：检查下一条是否是助手消息
-   - 是 → 删用户+助手（end=file_idx+2）
-   - 否 → 只删用户（end=file_idx+1）
-3. 助手消息：删前面的用户+自己（start=file_idx-1, end=file_idx+1）
-```
+`_update_content(expect_count=N)`：写回前重读磁盘，消息总数 ≠ N 即判定「读取→写回」窗口内有并发写入（典型场景：agent 正在流式追加），抛 `SessionChangedError` → HTTP 409，前端提示重试。
 
-#### 🔄 重新生成（仅助手消息）
-```
-1. 取 ctx.data.created_at → 后端定位助手消息
-2. 从助手消息向前找对应的用户消息索引 user_idx
-3. messages[:user_idx] 删除整轮
-4. 返回用户消息文本
-5. 前端用 nativeInputValueSetter 填入输入框 → 轮询等待发送按钮可用（最多 1 秒）→ 点击发送
-6. 1.5秒后刷新页面
-```
+### 刷新与跨刷新状态
 
-### 控制台命令
+破坏性操作后页面**硬刷新**（350ms 延迟）保证 DOM 与文件同步——宿主消息列表是模块私有的 zustand store，插件 API 面无任何写入口，外部改 DOM 会被下次 re-render 复活甚至弄崩 reconciler。刷新会丢失的三样东西经 `sessionStorage` 传递、加载时还原：
 
-#### `/noreply 消息`
-```
-1. 解析 args 获取消息文本
-2. 直接操作 session 文件追加一条用户消息
-3. 返回 Msg 阻止 agent 继续处理
-```
+| 状态 | 还原动作 |
+|------|---------|
+| 回填输入框文本 | 轮询等待 React 挂载就绪后 nativeInputValueSetter 填入 |
+| 撤销通知 | 重新弹出带「撤销」按钮的 notification |
+| 分叉跳转目标 | 侧栏列表拉出后派发 `qwenpaw:sidebar-select-session` 跳入新会话 |
 
-其他命令（`/rewind`、`/fork`、`/regen`）逻辑与 WebUI 按钮相同。
-
-## 📂 会话文件位置
+### 会话文件
 
 ```
 {workspace_dir}/sessions/{channel}/{user_id}_{sanitized_session_id}.json
 ```
 
-支持新旧两种格式：
-- **新格式**（`agent.state.context`）：Msg dict 列表，`created_at` 为 DateTime 对象
-- **旧格式**（`agent.memory.content`）：[msg_dict, extra] 对列表
+兼容新旧两种格式：新 `agent.state.context`（Msg dict 列表）、旧 `agent.memory.content`（`[msg_dict, extra]` 对列表），自动检测。
 
-## 🔧 技术细节
+---
 
-- **运行目录**：`~/.qwenpaw/plugins/qwenpaw-plugin-session-tools/`
-- **插件类型**：`command`
-- **消息定位**：`created_at` 时间戳统一转 Unix 秒数，先严格匹配（同一秒）再 ±1 秒容差匹配，多匹配时报错
-- **输入框填值**：`nativeInputValueSetter`（React 受控组件兼容）
-- **发送按钮**：`button.qwenpaw-sender-actions-btn`，轮询点击（最多 1 秒）
-- **调试开关**：`localStorage.setItem('SessionTools.debug', 'true')`
-- **多 agent 支持**：`SessionOperator` 按 workspace_dir 缓存；HTTP API 的 workspace 解析跟随当前 agent（`get_agent_for_request`，优先级 agent_id → request.state.agent_id → X-Agent-Id → active agent），前端 `callApi` 用原生 fetch + `host.getSelectedAgentId()` 实时设置 `X-Agent-Id` header
+## 常见问题
 
-## 📝 注意事项
+**Q：为什么点完按钮页面会刷新一下？**
+宿主的消息渲染数据在插件不可达的 React store 里，只改文件不改 store 会造成"页面看着还在、刷新后消失"的假象；外部直接删 DOM 节点会被 React 下次渲染复活甚至报错。硬刷新 + sessionStorage 状态传递是目前宿主架构下唯一可靠的同步方式。
 
-- **修改后需要 Ctrl+F5 硬刷新**，浏览器可能缓存旧 JS
-- **`created_at` 先严格匹配再 ±1 秒容差**，同一秒内多条消息或相近时间多条消息时报 409 Conflict
-- **🔄 regen 后 1.5 秒自动刷新**，等待 agent 生成回复；自动提交改用轮询机制（最多等 1 秒），兼容慢机器
-- **`/noreply` 不会触发 AI 回复**，仅记录用户消息
+**Q：误删了怎么办？**
+通知里点「撤销」（12 秒内），或输入 `/undo` 还原最近快照，或 `/undo <快照ID>` 还原指定版本（`GET /api/session-tools/session/{sid}/snapshots` 可查）。快照在 agent 重启后依然有效。
 
-## 🧩 依赖
+**Q：分叉报 `Unexpected token '<'`？**
+v3.0.0 已修复（长文本截断防 URL 超长）。若仍出现，确认前端脚本是新版：硬刷新后 F12 Console 应有 `[SessionToolsPro] 按钮注册完成`。
 
-- QwenPaw >= 2.0.0
-- Python >= 3.10
+**Q：agent 正在回复时点了按钮会怎样？**
+写入前并发校验发现消息数变了 → 409 中止，你的新消息不会被覆盖，等回复完成后重试即可。
+
+**Q：原版能和本插件共存吗？**
+不能，slash 命令与 HTTP 前缀冲突，先 `qwenpaw plugin uninstall qwenpaw-plugin-session-tools`。
+
+**Q：改了插件代码不生效？**
+`qwenpaw plugin install <路径> --force` 热重装 + 浏览器 Ctrl+Shift+R 硬刷新（前端 JS 有缓存）。
+
+---
+
+## 版本更新摘要
+
+### v3.0.0 (2026-10-11) — SessionToolsPro 首个版本（基于上游 v2.4.0）
+
+**数据安全**
+- 破坏性操作前自动快照到 `sessions/.session-tools-pro-backups/`（每会话 20 份），新增 `/undo` 命令与 HTTP undo 端点；撤销操作本身也有快照
+- `_update_content` 增加 `expect_count` 乐观并发校验，冲突返回 409，杜绝"操作期间 agent 追加消息被静默覆盖"
+- `regen` 移除"先删会话文件、再 DOM 模拟点击发送"链路——改为删除+回填输入框由用户确认发送，删文件与发送失败不再可能丢数据
+- fork 的 HTTP 路径删除手写 `chats.json` 分支，与 slash 统一走 `ChatManager.create_chat`，不再与运行中的 ChatManager 互相覆盖
+
+**前端重写**
+- `confirm()`/`alert()`/emoji → 宿主 `antd` Popconfirm / notification / `@ant-design/icons`，跟随主题
+- 按钮经 `item.render` 整体接管（宿主 Footer.Actions 对 render 项只 `cloneElement(key)` 不绑 onClick），自带 loading 防重复提交
+- 操作结果通知带「撤销」按钮；回填文本、撤销通知、分叉跳转经 sessionStorage 跨硬刷新传递
+- 用户气泡补齐「撤回/删除」，与助手气泡按钮集与顺序一致
+- `message_text` 截断 200 字符，修复长回复分叉时 URL 超请求行上限被 uvicorn 拒 400（前端解析 HTML 报 `Unexpected token '<'`）
+- 移除对不存在的 `window.currentUserId/currentChannel` 的依赖，`user_id/channel` 改由后端扫描会话目录反查
+
+**行为修正**
+- 删除改为**轮次感知**：删整轮（user + assistant + system 工具链），原版只删"相邻一对"
+- 回退/撤回一律回填**本轮用户提问**，原版点助手气泡会错误回填 AI 回复文本
+- 消息定位三层兜底（id → 时间 → 文本+角色），原版 id/时间失配即按钮失效
+
+### v2.4.0（上游基线，one-sixth/qwenpaw-plugin-session-tools）
+- 初版能力：/rewind /fork /regen /noreply、气泡按钮、created_at/original_id 定位
+
+---
+
+## 来源与致谢
+
+- 本项目是 **[qwenpaw-plugin-session-tools](https://platform.agentscope.io/plugins/qwenpaw-plugin-session-tools)**（作者 [one-sixth](https://github.com/one-sixth)，MIT）的增强分叉（forked from v2.4.0）。git 历史保留了完整上游基线：`v2.4.0-baseline` tag 即原版源码，`v3.0.0` 起为 Pro 改造，`git diff v2.4.0-baseline v3.0.0` 可查看全部差异。
+- 感谢上游提供优秀的起点；本仓库的改动集中在数据安全（快照/并发校验/轮次删除）与前端交互（antd 化/可撤销/不模拟发送）。
 
 ## 📄 许可
 
-MIT License
+MIT License — 见 [LICENSE](LICENSE)
 
 ## 👥 作者
 
-- [one-sixth](https://github.com/one-sixth)
+- **ccy-max (Zero)** ｜ https://github.com/ccy-max
