@@ -4,7 +4,7 @@
   "version": "3.0.3",
   "type": "command",
   "description": "会话增强 Pro (SessionToolsPro) — QwenPaw 会话管理插件，基于 qwenpaw-plugin-session-tools 增强：快照/undo、并发防覆盖、轮次感知删除、antd 化气泡按钮",
-  "author": "BOOS (forked from one-sixth/qwenpaw-plugin-session-tools 2.4.0)",
+  "author": "Zero",
   "entry": {
     "backend": "backend/plugin.py",
     "frontend": "frontend/index.js"
