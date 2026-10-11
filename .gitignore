@@ -1,1 +1,6 @@
+__pycache__/
 *.pyc
+*.pyo
+.DS_Store
+*.log
+.session-tools-pro-backups/
