@@ -1,714 +1,658 @@
 /**
- * QwenPaw 会话增强工具 — 前端 UI（QwenPaw 2.x 版本）
+ * 会话增强 Pro — 前端 UI（QwenPaw 2.x / session-tools-pro 3.0.0）
  *
- * ★ 消息定位策略（2026-08-14 增强）：
- *   优先使用 original_id（精确 UUID 匹配），不可用时回退到 created_at（秒级模糊匹配）
+ * 相对原版 2.4.0 的变化：
+ * - confirm()/alert() → antd Popconfirm / notification（host.antd，跟随主题）
+ * - emoji → @ant-design/icons（host.antdIcons）
+ * - 所有按钮走 render 整体接管（宿主 Footer.Actions 对 item.render 只
+ *   cloneElement(key)，不绑 onClick —— 点击行为完全由我们渲染的组件负责）
+ * - 破坏性操作成功后硬刷新保证 DOM 同步（宿主对"切到当前会话"是
+ *   no-op，软刷新不可靠）；回填输入框 / 撤销通知 / fork 后跳新会话
+ *   这些意图经 sessionStorage 传递，刷新后由 restorePending 还原
+ * - regen → 改为「撤回本轮并编辑」：后端删除该轮，原文回填输入框，
+ *   由用户确认后手动发送 —— 删掉脆弱的 DOM 模拟发送（Enter+click）
+ * - 不再依赖不存在的 window.currentUserId / currentChannel；
+ *   user_id/channel 干脆不传，后端扫描 sessions/ 反查
+ * - 定位三层兜底：original_id → created_at → 文本+角色
  *
- * 数据来源：
- *   - 用户气泡：ctx.data.input[0].metadata.original_id → session 文件 msg.id
- *   - 助手气泡：ctx.data.output[0].metadata.original_id → session 文件 msg.id
- *   - 兜底：ctx.data.created_at → find_message_by_created_at()
- *
- * 历史方案（已废弃，注释保留供参考）：
- *   - message_id 注入方案：改 envelope.py / utils.py 注入 msg.id → 前端拿不到（已移除）
- *   - 文本+时间+邻居三层匹配：Markdown 渲染不一致、时间格式不匹配（已移除）
+ * 调试：localStorage.setItem('SessionToolsPro.debug','true') 后刷新，
+ * 出现 🔍（ctx.data 探测）和 📄（消息 JSON）按钮。
  */
-
 (function () {
   "use strict";
 
-  const PLUGIN_NAME = "SessionTools";
+  var GROUP = "SessionToolsPro";
+  var API_PREFIX = "/session-tools";
 
-  // ── Debug 开关 ─────────────────────────────────────────
-  // localStorage.setItem('SessionTools.debug', 'true') 开启探查按钮 🔍📄
-  // localStorage.removeItem('SessionTools.debug') 关闭后刷新
-  const DEBUG = localStorage.getItem(PLUGIN_NAME + '.debug') === 'true';
-  console.log("[" + PLUGIN_NAME + "] debug mode:", DEBUG);
+  function host() {
+    return (window.QwenPaw && window.QwenPaw.host) || {};
+  }
+  function h() {
+    var R = host().React;
+    if (!R) throw new Error("host.React unavailable");
+    return R;
+  }
+  var DEBUG = localStorage.getItem(GROUP + ".debug") === "true";
 
-  // ── 工具函数 ─────────────────────────────────────────────────────────
+  // ── 基础工具 ─────────────────────────────────────────────
 
-  /**
-   * 获取 API URL
-   * @param {string} path - API 路径
-   * @returns {string} 完整的 API URL
-   */
   function getApiUrl(path) {
     try {
-      if (window.QwenPaw && window.QwenPaw.host && window.QwenPaw.host.getApiUrl) {
-        return window.QwenPaw.host.getApiUrl(path);
-      }
+      if (host().getApiUrl) return host().getApiUrl(path);
     } catch (_) {}
-    var base = window.location.origin;
-    return base + "/api" + path;
+    return window.location.origin + "/api" + path;
   }
 
-  /**
-   * 获取 API 认证 token
-   * @returns {string} 认证 token
-   */
   function getApiToken() {
     try {
-      if (window.QwenPaw && window.QwenPaw.host && window.QwenPaw.host.getApiToken) {
-        return window.QwenPaw.host.getApiToken();
-      }
+      if (host().getApiToken) return host().getApiToken() || "";
     } catch (_) {}
     return "";
   }
 
-  /**
-   * 获取当前会话 ID
-   * @returns {string} 当前会话 ID
-   */
+  /** 当前会话 ID：宿主 runtime API → URL 兜底 → 旧全局兜底 */
   function getSessionId() {
-    if (window.QwenPaw && window.QwenPaw.host && window.QwenPaw.host.getCurrentSessionId) {
-      return window.QwenPaw.host.getCurrentSessionId() || "";
-    }
+    var hh = host();
+    try {
+      if (hh.getCurrentSessionId) {
+        var sid = hh.getCurrentSessionId();
+        if (sid) return sid;
+      }
+    } catch (_) {}
+    var m = window.location.pathname.match(/\/chat\/([^/?#]+)/);
+    if (m && m[1] !== "new") return m[1];
     return window.currentSessionId || "";
   }
 
-  /**
-   * 获取当前用户和会话信息
-   * @returns {Object} 包含 user_id 和 channel 的对象
-   */
-  function getUserSessionInfo() {
-    return {
-      user_id: window.currentUserId || "default",
-      channel: window.currentChannel || "console",
-    };
-  }
-
-  /**
-   * 从 ctx.data 中提取 original_id（消息 UUID，对应 session 文件 msg.id）
-   *
-   * 用户气泡：ctx.data.input[0].metadata.original_id
-   * 助手气泡：ctx.data.output[0].metadata.original_id
-   *
-   * 优先使用 original_id 精确匹配，不可用时由调用方回退到 created_at。
-   *
-   * @param {Object} ctx - onClick 的上下文对象
-   * @returns {string|null} original_id 或 null
-   */
-  function getOriginalId(ctx) {
-    if (!ctx || !ctx.data) return null;
-    var data = ctx.data;
-    // 用户气泡：input[0].metadata.original_id
-    if (data.input && data.input[0] && data.input[0].metadata) {
-      var oid = data.input[0].metadata.original_id;
-      if (oid) return oid;
-    }
-    // 助手气泡：output[0].metadata.original_id
-    if (data.output && data.output[0] && data.output[0].metadata) {
-      var oid = data.output[0].metadata.original_id;
-      if (oid) return oid;
-    }
-    return null;
-  }
-
-  /**
-   * 调用后端 API
-   * @param {string} method - HTTP 方法
-   * @param {string} path - API 路径
-   * @param {Object} params - 查询参数
-   * @returns {Promise<Object|null>} 响应数据
-   */
   async function callApi(method, path, params) {
     var url = getApiUrl(path);
-    var queryParts = [];
+    var qs = [];
     if (params) {
-      for (var key in params) {
-        if (params.hasOwnProperty(key) && params[key] !== undefined && params[key] !== null && params[key] !== "") {
-          queryParts.push(encodeURIComponent(key) + "=" + encodeURIComponent(String(params[key])));
+      for (var k in params) {
+        if (params.hasOwnProperty(k) && params[k] !== undefined && params[k] !== null && params[k] !== "") {
+          qs.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(params[k])));
         }
       }
     }
-    if (queryParts.length > 0) {
-      url += "?" + queryParts.join("&");
-    }
+    if (qs.length) url += "?" + qs.join("&");
 
+    var headers = { "Content-Type": "application/json" };
+    var token = getApiToken();
+    if (token) headers["Authorization"] = "Bearer " + token;
     try {
-      var token = getApiToken();
-      var headers = { "Content-Type": "application/json" };
-      if (token) {
-        headers["Authorization"] = "Bearer " + token;
-      }
-
-      // 多 agent 感知：用 host.getSelectedAgentId() 实时读取当前选中 agent。
-      // 注意：不能使用 host.fetch —— 它内部会再次拼接 /api 前缀，
-      // 与 getApiUrl() 返回的完整 URL 冲突，导致请求 /api/api/... 失败。
-      // 因此这里用原生 fetch + 手动设置 X-Agent-Id 请求头。
-      var host = null;
-      if (window.QwenPaw && window.QwenPaw.host) {
-        host = window.QwenPaw.host;
-      }
-      if (host && typeof host.getSelectedAgentId === "function") {
-        var agentId = host.getSelectedAgentId();
-        if (agentId) {
-          headers["X-Agent-Id"] = agentId;
-        }
-      }
-      var resp = await fetch(url, {
-        method: method,
-        headers: headers,
-      });
-      return await resp.json();
-    } catch (e) {
-      console.error("[" + PLUGIN_NAME + "] API call failed:", e);
-      return null;
-    }
-  }
-
-  /**
-   * 显示 Toast 通知
-   * @param {string} text - 通知文本
-   * @param {string} type - 类型: success/error/info
-   */
-  function showToast(text, type) {
-    type = type || "info";
-    try {
-      if (window.QwenPaw && window.QwenPaw.host && window.QwenPaw.host.antd && window.QwenPaw.host.antd.message) {
-        window.QwenPaw.host.antd.message[type](text);
-        return;
+      if (host().getSelectedAgentId) {
+        var agentId = host().getSelectedAgentId();
+        if (agentId) headers["X-Agent-Id"] = agentId;
       }
     } catch (_) {}
-    console.log("[" + PLUGIN_NAME + "] " + type + ": " + text);
+
+    try {
+      var resp = await fetch(url, { method: method, headers: headers });
+      return await resp.json();
+    } catch (e) {
+      console.error("[" + GROUP + "] API call failed:", e);
+      return { success: false, detail: "网络错误: " + e.message };
+    }
+  }
+
+  // ── antd 桥接 ────────────────────────────────────────────
+
+  function antd() {
+    return host().antd || {};
+  }
+  function icons() {
+    return host().antdIcons || {};
+  }
+
+  function toast(text, type) {
+    var a = antd();
+    if (a.message && a.message[type]) { a.message[type](text); return; }
+    if (a.message) { a.message(text); return; }
+    console.log("[" + GROUP + "] " + (type || "info") + ": " + text);
+  }
+
+  /** 成功通知，可带「撤销」按钮 */
+  function notifySuccess(title, description, onUndo) {
+    var a = antd();
+    if (!a.notification || !a.notification.open) { toast(title + (description ? " — " + description : ""), "success"); return; }
+    var React = h();
+    var Button = a.Button;
+    var opts = {
+      message: title,
+      description: description || undefined,
+      placement: "bottomRight",
+      duration: onUndo ? 12 : 4,
+    };
+    if (onUndo && Button) {
+      opts.btn = React.createElement(Button, {
+        size: "small",
+        danger: true,
+        type: "primary",
+        onClick: function () {
+          a.notification.destroy("stpro-undo");
+          onUndo();
+        },
+      }, "撤销（还原快照）");
+      opts.key = "stpro-undo";
+    }
+    a.notification.open(opts);
+  }
+
+  function errText(result, fallback) {
+    if (!result) return fallback;
+    return result.detail || (result.success === false ? JSON.stringify(result) : fallback);
+  }
+
+  // ── 刷新 + 跨刷新状态传递 ────────────────────────────────
+  //
+  // 宿主的侧栏切换事件对"切到当前会话"是 no-op（路由判定没换会话，
+  // 不会重新拉消息 store），所以同会话的破坏性操作只能硬刷新让 DOM
+  // 与文件同步。为了刷新后不丢"回填输入框 / 撤销通知 / 跳转新会话"，
+  // 把这些意图存进 sessionStorage，刷新后由 restorePending 还原。
+
+  var PENDING_KEY = GROUP + ".pending";
+  var PENDING_TTL = 20000; // 20s 内有效，过期丢弃避免陈旧还原
+
+  function scheduleReload(payload) {
+    try {
+      payload.ts = Date.now();
+      sessionStorage.setItem(PENDING_KEY, JSON.stringify(payload));
+    } catch (_) {}
+    setTimeout(function () { window.location.reload(); }, 350);
+  }
+
+  function consumePending() {
+    var raw;
+    try {
+      raw = sessionStorage.getItem(PENDING_KEY);
+      if (!raw) return null;
+      sessionStorage.removeItem(PENDING_KEY);
+    } catch (_) { return null; }
+    try {
+      var p = JSON.parse(raw);
+      if (!p || (Date.now() - (p.ts || 0)) > PENDING_TTL) return null;
+      return p;
+    } catch (_) { return null; }
+  }
+
+  /** 通过宿主侧栏机制跳转到某会话（跨会话场景，列表须已含该会话） */
+  function switchToSession(sessionId) {
+    window.dispatchEvent(new CustomEvent("qwenpaw:sidebar-select-session", {
+      detail: { sessionId: sessionId },
+    }));
+  }
+
+  /** 轮询等 React 挂载好输入框再回填 */
+  function fillWhenReady(text) {
+    var tries = 0;
+    (function attempt() {
+      if (putIntoSender(text)) return;
+      if (tries++ < 25) setTimeout(attempt, 150);
+    })();
+  }
+
+  /** 刷新后还原：回填输入框、弹撤销通知、跳转 fork 新会话 */
+  function restorePending(p) {
+    if (!p) return;
+    if (p.text) fillWhenReady(p.text);
+    if (p.notify) {
+      notifySuccess(p.notify.title, p.notify.desc,
+        p.notify.undoId ? function () { doUndo(p.sessionId, p.notify.undoId); } : null);
+    }
+    if (p.navigateTo) {
+      // 等侧栏列表刷新出来后跳转；多次重试派发事件
+      var tries = 0;
+      (function go() {
+        switchToSession(p.navigateTo);
+        if (tries++ < 8 && getSessionId() !== p.navigateTo) setTimeout(go, 400);
+      })();
+    }
+  }
+
+  // ── 输入框回填 ───────────────────────────────────────────
+
+  function putIntoSender(text) {
+    var el = document.querySelector("textarea.qwenpaw-sender-input") ||
+             document.querySelector(".qwenpaw-sender-input textarea") ||
+             document.querySelector("textarea");
+    if (!el) return false;
+    try {
+      var setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(el, text);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.focus();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ── ctx.data 定位信息提取 ────────────────────────────────
+
+  function blocksText(blocks) {
+    if (!blocks) return "";
+    if (typeof blocks === "string") return blocks;
+    if (Array.isArray(blocks)) {
+      for (var i = 0; i < blocks.length; i++) {
+        var b = blocks[i];
+        if (b && b.type === "text" && typeof b.text === "string") return b.text;
+      }
+    }
+    return "";
   }
 
   /**
-   * 刷新当前页面（延迟 2 秒，让用户看到提示）
+   * 从 ctx.data 提取定位三件套 + 角色
+   * 用户气泡: ctx.data.input[]；助手气泡: ctx.data.output[]
    */
-  function refreshPage() {
-    setTimeout(function () {
-      window.location.reload();
-    }, 2000);
-  }
-
-  // ── 按钮创建 ─────────────────────────────────────────────────────────
-
-  /**
-   * 创建回退按钮配置
-   * ★ 使用 ctx.data.created_at 定位消息 ★
-   * @returns {Object} ChatActionSpec
-   */
-  function makeRewindButton() {
+  function getLocator(ctx) {
+    var data = (ctx && ctx.data) || {};
+    var msg = null, role = "";
+    if (data.input && data.input[0]) { msg = data.input[0]; role = "user"; }
+    else if (data.output && data.output[0]) { msg = data.output[0]; role = "assistant"; }
+    var meta = (msg && msg.metadata) || {};
+    // message_text 仅用于后端"前缀+时间+邻居"兜底定位，后端只比对前 50 字符；
+    // 整段塞进 query string 会让长回复（几千字）撑爆请求行被 uvicorn 拒 400
+    // （浏览器收到 HTML 错误页 → "Unexpected token '<'"），故截断到 200。
+    var text = blocksText(msg && msg.content);
     return {
-      id: PLUGIN_NAME + ".rewind",
-      icon: createIcon("⏪"),
-      onClick: function (ctx) {
-        if (!ctx || !ctx.data) {
-          showToast("ctx.data 为空", "error");
-          return;
-        }
-
-        var createdAt = ctx.data.created_at;
-        if (createdAt === undefined || createdAt === null) {
-          showToast("ctx.data.created_at 不存在", "error");
-          return;
-        }
-
-        if (!confirm("确认要回退到该消息（删除之后所有消息）吗？")) return;
-
-        var sessionId = getSessionId();
-        if (!sessionId) {
-          showToast("无法获取会话 ID", "error");
-          return;
-        }
-        var userInfo = getUserSessionInfo();
-        var originalId = getOriginalId(ctx);
-        var params = {
-          session_id: sessionId,
-          user_id: userInfo.user_id,
-          channel: userInfo.channel,
-          created_at: String(createdAt),
-        };
-        if (originalId) {
-          params.original_id = originalId;
-        }
-
-        callApi("POST", "/session-tools/session/" + encodeURIComponent(sessionId) + "/rewind", params)
-          .then(function (result) {
-            if (result && result.success) {
-              showToast("⏪ 已回退", "success");
-              if (result.rewound_message) {
-                // 尝试将消息填入输入框
-                try {
-                  var inputEl = document.querySelector(".qwenpaw-sender-content");
-                  if (inputEl && !inputEl.value) {
-                    inputEl.value = result.rewound_message;
-                    inputEl.dispatchEvent(new Event("input", { bubbles: true }));
-                  }
-                } catch (_) {}
-              }
-              refreshPage();
-            } else {
-              var detail = result ? (result.detail || JSON.stringify(result)) : "未知错误";
-              showToast("回退失败: " + detail, "error");
-            }
-          });
-      },
+      original_id: meta.original_id || "",
+      created_at: data.created_at !== undefined && data.created_at !== null ? String(data.created_at) : "",
+      message_text: text.length > 200 ? text.slice(0, 200) : text,
+      role: role,
     };
   }
 
-  /**
-   * 创建分叉按钮配置
-   * ★ 使用 ctx.data.created_at 定位消息 ★
-   * @returns {Object} ChatActionSpec
-   */
-  function makeForkButton() {
-    return {
-      id: PLUGIN_NAME + ".fork",
-      icon: createIcon("🍴"),
-      onClick: function (ctx) {
-        if (!ctx || !ctx.data) {
-          showToast("ctx.data 为空", "error");
-          return;
-        }
-
-        var createdAt = ctx.data.created_at;
-        if (createdAt === undefined || createdAt === null) {
-          showToast("ctx.data.created_at 不存在", "error");
-          return;
-        }
-
-        if (!confirm("确认要从此处分叉新会话吗？")) return;
-
-        var sessionId = getSessionId();
-        if (!sessionId) {
-          showToast("无法获取会话 ID", "error");
-          return;
-        }
-        var userInfo = getUserSessionInfo();
-        var originalId = getOriginalId(ctx);
-        var params = {
-          session_id: sessionId,
-          user_id: userInfo.user_id,
-          channel: userInfo.channel,
-          created_at: String(createdAt),
-        };
-        if (originalId) {
-          params.original_id = originalId;
-        }
-
-        callApi("POST", "/session-tools/session/" + encodeURIComponent(sessionId) + "/fork", params)
-          .then(function (result) {
-            if (result && result.success) {
-              var name = result.session_name || "新会话";
-              showToast("🍴 已分叉: " + name + "，2秒后刷新", "success");
-              refreshPage();
-            } else {
-              var detail = result ? (result.detail || JSON.stringify(result)) : "未知错误";
-              showToast("分叉失败: " + detail, "error");
-            }
-          });
-      },
-    };
-  }
+  // ── 按钮基座（render 整体接管） ──────────────────────────
 
   /**
-   * 创建删除按钮配置
-   * ★ 使用 ctx.data.created_at 定位消息 ★
-   * @returns {Object} ChatActionSpec
+   * 生成一个 React 组件（函数组件），渲染 antd Tooltip(+Popconfirm)+Button。
+   *
+   * cfg: { title, confirm, danger, icon(name), isDebug, action(ctxData, done) }
+   *   - confirm 为字符串时点击先弹 Popconfirm，确认后才执行 action
+   *   - action 收到 locator 相关 ctx，自行调 API 并调用 done(result)
+   *   - 组件内部维护 loading，防重复提交
    */
-  function makeDeleteButton() {
-    return {
-      id: PLUGIN_NAME + ".delete",
-      icon: createIcon("🗑"),
-      onClick: function (ctx) {
-        if (!ctx || !ctx.data) {
-          showToast("ctx.data 为空", "error");
-          return;
-        }
+  function makeButton(cfg) {
+    var React = h();
+    var a = antd();
+    var ic = icons();
+    var IconComp = ic[cfg.icon] || null;
 
-        var createdAt = ctx.data.created_at;
-        if (createdAt === undefined || createdAt === null) {
-          showToast("ctx.data.created_at 不存在", "error");
-          return;
-        }
+    var Tooltip = a.Tooltip;
+    var Popconfirm = a.Popconfirm;
+    var Button = a.Button;
 
-        if (!confirm("确认要删除该轮对话（用户消息+助手回复）吗？")) return;
+    return function StProButton(props) {
+      var ctxData = props && props.data;
+      var loadingState = React.useState(false);
+      var loading = loadingState[0], setLoading = loadingState[1];
+      var openState = React.useState(false);
+      var popOpen = openState[0], setPopOpen = openState[1];
 
-        var sessionId = getSessionId();
-        if (!sessionId) {
-          showToast("无法获取会话 ID", "error");
-          return;
-        }
-        var userInfo = getUserSessionInfo();
-        var originalId = getOriginalId(ctx);
-        var params = {
-          session_id: sessionId,
-          user_id: userInfo.user_id,
-          channel: userInfo.channel,
-          created_at: String(createdAt),
-        };
-        if (originalId) {
-          params.original_id = originalId;
-        }
-
-        callApi("DELETE", "/session-tools/session/" + encodeURIComponent(sessionId) + "/message", params)
-          .then(function (result) {
-            if (result && result.success) {
-              showToast("🗑 已删除", "success");
-              refreshPage();
-            } else {
-              var detail = result ? (result.detail || JSON.stringify(result)) : "未知错误";
-              showToast("删除失败: " + detail, "error");
-            }
-          });
-      },
-    };
-  }
-
-  /**
-   * 创建重新生成按钮 — 仅助手消息
-   * 先 rewind 到该消息，再把最后用户消息填入输入框并触发发送
-   * @returns {Object} ChatActionSpec
-   */
-  function makeRegenButton() {
-    return {
-      id: PLUGIN_NAME + ".regen",
-      icon: createIcon("🔄"),
-      onClick: function (ctx) {
-        if (!ctx || !ctx.data) {
-          showToast("ctx.data 为空", "error");
-          return;
-        }
-
-        var createdAt = ctx.data.created_at;
-        if (createdAt === undefined || createdAt === null) {
-          showToast("ctx.data.created_at 不存在", "error");
-          return;
-        }
-
-        var sessionId = getSessionId();
-        if (!sessionId) {
-          showToast("无法获取会话 ID", "error");
-          return;
-        }
-        var userInfo = getUserSessionInfo();
-        var originalId = getOriginalId(ctx);
-
-        if (!confirm("确认要重新生成该助手消息吗？")) return;
-
-        var params = {
-          session_id: sessionId,
-          user_id: userInfo.user_id,
-          channel: userInfo.channel,
-          created_at: String(createdAt),
-        };
-        if (originalId) {
-          params.original_id = originalId;
-        }
-
-        callApi("POST", "/session-tools/session/" + encodeURIComponent(sessionId) + "/regen", params).then(function (result) {
-          if (result && result.success) {
-            showToast("🔄 已回退，正在重新发送...", "success");
-            // 把文本填入输入框并触发发送
-            // 注意：QwenPaw 输入框是 React 受控组件，需要用 native setter 技巧
-            try {
-              var inputEl = document.querySelector("textarea.qwenpaw-sender-input");
-              if (inputEl) {
-                // 使用原生 setter 绕过 React value 代理
-                var nativeSetter = Object.getOwnPropertyDescriptor(
-                  window.HTMLTextAreaElement.prototype, "value"
-                ).set;
-                nativeSetter.call(inputEl, result.rewound_message || "");
-                inputEl.dispatchEvent(new Event("input", { bubbles: true }));
-
-                // 轮询等待发送按钮可用，最多等 1 秒
-                var maxAttempts = 10;
-                var attempt = 0;
-                (function tryClick() {
-                  var sendBtn = document.querySelector("button.qwenpaw-sender-actions-btn");
-                  if (sendBtn && !sendBtn.disabled) {
-                    // 先模拟 Enter 键提交（兼容 Chrome 133 等旧版 React 事件系统）
-                    inputEl.dispatchEvent(new KeyboardEvent("keydown", {
-                      key: "Enter",
-                      code: "Enter",
-                      keyCode: 13,
-                      which: 13,
-                      bubbles: true,
-                      cancelable: true,
-                    }));
-                    // 兜底：点击按钮
-                    setTimeout(function() {
-                      sendBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-                    }, 50);
-                    setTimeout(refreshPage, 1500);
-                  } else if (attempt < maxAttempts) {
-                    attempt++;
-                    setTimeout(tryClick, 100);
-                  } else {
-                    console.log("[" + PLUGIN_NAME + "] 发送按钮在 1 秒内未就绪");
-                  }
-                })();
-              }
-            } catch (_) {}
-          } else {
-            var detail = result ? (result.detail || JSON.stringify(result)) : "未知错误";
-            showToast("重新生成失败: " + detail, "error");
-          }
-        });
-      },
-    };
-  }
-
-  /**
-   * 创建检查按钮 — 用 created_at 匹配会话文件中的消息并展示完整 JSON
-   * @returns {Object} ChatActionSpec
-   */
-  function makeInspectButton() {
-    return {
-      id: PLUGIN_NAME + ".inspect",
-      icon: createIcon("📄"),
-      onClick: function (ctx) {
-        if (!ctx || !ctx.data) {
-          showToast("ctx.data 为空", "error");
-          return;
-        }
-
-        var createdAt = ctx.data.created_at;
-        if (createdAt === undefined || createdAt === null) {
-          showToast("ctx.data.created_at 不存在", "error");
-          return;
-        }
-
-        var sessionId = getSessionId();
-        if (!sessionId) {
-          showToast("无法获取会话 ID", "error");
-          return;
-        }
-        var userInfo = getUserSessionInfo();
-        var originalId = getOriginalId(ctx);
-
-        // 调后端 API
-        var params = {
-          session_id: sessionId,
-          user_id: userInfo.user_id,
-          channel: userInfo.channel,
-          created_at: String(createdAt),
-        };
-        if (originalId) {
-          params.original_id = originalId;
-        }
-
-        callApi("GET", "/session-tools/session/" + encodeURIComponent(sessionId) + "/message", params).then(function (result) {
-          if (result && result.success) {
-            var msgStr = JSON.stringify(result.message, null, 2);
-            // 打开新页签展示
-            try {
-              var win = window.open('', '_blank');
-              if (win) {
-                win.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>📄 消息 JSON</title>');
-                win.document.write('<style>');
-                win.document.write('body{background:#1a1a2e;color:#e0e0e0;font-family:Consolas,monospace;font-size:13px;line-height:1.6;padding:24px;margin:0;}');
-                win.document.write('pre{white-space:pre-wrap;word-break:break-all;margin:0;}');
-                win.document.write('h2{color:#ffd700;margin-top:0;}');
-                win.document.write('.meta{color:#888;font-size:12px;margin-bottom:16px;}');
-                win.document.write('</style></head><body>');
-                win.document.write('<h2>📄 消息 JSON</h2>');
-                win.document.write('<div class="meta">index: ' + result.index + '</div>');
-                win.document.write('<hr style="border-color:#444">');
-                win.document.write('<pre>' + escapeHtml(msgStr) + '</pre>');
-                win.document.write('</body></html>');
-                win.document.close();
-                return;
-              }
-            } catch (_) {}
-            // 兜底
-            console.log('[' + PLUGIN_NAME + '] message JSON:', msgStr);
-            alert('消息 JSON 已打印到控制台');
-          } else {
-            var detail = result ? (result.detail || JSON.stringify(result)) : "未知错误";
-            showToast("获取消息失败: " + detail, "error");
-          }
-        });
-      },
-    };
-  }
-
-  /**
-   * 深度探测 ctx.data：展开所有 key，把对象/数组序列化展示
-   */
-  function deepProbe(data) {
-    if (!data || typeof data !== 'object') return { value: String(data) };
-    var result = {};
-    var seen = new WeakSet();
-    (function walk(obj, prefix) {
-      if (!obj || typeof obj !== 'object') { result[prefix] = String(obj); return; }
-      if (seen.has(obj)) { result[prefix] = '[Circular]'; return; }
-      seen.add(obj);
-      var keys = Object.keys(obj);
-      for (var i = 0; i < keys.length; i++) {
-        var k = keys[i];
-        var v = obj[k];
-        var fullKey = prefix ? prefix + '.' + k : k;
-        if (v === null) {
-          result[fullKey] = 'null';
-        } else if (Array.isArray(v)) {
-          result[fullKey] = 'Array[' + v.length + ']';
-          if (v.length > 0 && typeof v[0] === 'object' && v[0] !== null) {
-            walk(v[0], fullKey + '[0]');
-          } else if (v.length > 0) {
-            result[fullKey + '[0]'] = String(v[0]);
-          }
-        } else if (typeof v === 'object') {
-          result[fullKey] = typeof v;
-          walk(v, fullKey);
-        } else {
-          result[fullKey] = String(v);
+      function run() {
+        if (loading) return;
+        setLoading(true);
+        var done = function () { setLoading(false); setPopOpen(false); };
+        try {
+          cfg.action({ data: ctxData, locator: getLocator({ data: ctxData }) }, done);
+        } catch (e) {
+          console.error("[" + GROUP + "] action error:", e);
+          toast("操作异常: " + e.message, "error");
+          done();
         }
       }
-    })(data, '');
-    return result;
-  }
 
-  /**
-   * 创建调试按钮 — 显示完整 ctx.data
-   * @returns {Object} ChatActionSpec
-   */
-  function makeDebugButton() {
-    return {
-      id: PLUGIN_NAME + ".debug",
-      icon: createIcon("🔍"),
-      onClick: function (ctx) {
-        if (!ctx || !ctx.data) {
-          showToast("ctx.data 为空", "error");
-          return;
-        }
+      // 无 onClick 兜底时（组件自管），loading 需自行超时复位：
+      // action 内部必须调用 done；若忘记，15s 兜底复位
+      React.useEffect(function () {
+        if (!loading) return;
+        var t = setTimeout(function () { setLoading(false); }, 15000);
+        return function () { clearTimeout(t); };
+      }, [loading]);
 
-        // 展平探测
-        var flat = deepProbe(ctx.data);
-        var lines = [];
-        var keys = Object.keys(flat);
-        for (var i = 0; i < keys.length; i++) {
-          var k = keys[i];
-          var label = k ? k : '(data)';
-          lines.push(label + ' => ' + flat[k]);
-        }
-        var detail = lines.join('\n');
+      var iconNode = IconComp
+        ? React.createElement(IconComp, { spin: cfg.icon === "SyncOutlined" && loading })
+        : React.createElement("span", { style: { fontSize: 14 } }, cfg.fallbackEmoji || "•");
 
-        // 打开新页签显示完整结果
-        try {
-          var win = window.open('', '_blank');
-          if (win) {
-            win.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>🔍 ctx.data 探测结果</title>');
-            win.document.write('<style>');
-            win.document.write('body{background:#1a1a2e;color:#e0e0e0;font-family:Consolas,monospace;font-size:13px;line-height:1.6;padding:24px;margin:0;}');
-            win.document.write('pre{white-space:pre-wrap;word-break:break-all;margin:0;}');
-            win.document.write('h2{color:#ffd700;margin-top:0;}');
-            win.document.write('.key{color:#7ec8e3;}.sep{color:#888;}.val{color:#a8d8a8;}');
-            win.document.write('</style></head><body>');
-            win.document.write('<h2>🔍 ctx.data 探测结果</h2><hr style="border-color:#444">');
-            win.document.write('<pre>');
-            for (var j = 0; j < keys.length; j++) {
-              var k2 = keys[j];
-              var label2 = k2 ? k2 : '(data)';
-              win.document.write('<span class="key">' + escapeHtml(label2) + '</span><span class="sep"> => </span><span class="val">' + escapeHtml(flat[k2]) + '</span>\n');
-            }
-            win.document.write('</pre>');
-            win.document.write('</body></html>');
-            win.document.close();
-            return;
-          }
-        } catch (_) {}
+      var btnProps = {
+        type: "text",
+        size: "small",
+        icon: iconNode,
+        danger: !!cfg.danger,
+        style: cfg.color ? { color: cfg.color } : undefined,
+        loading: loading,
+        disabled: !cfg.alwaysOn === false && false,
+        onClick: cfg.confirm ? undefined : run,
+      };
+      if (cfg.confirm) {
+        // Popconfirm 受控：渲染在 Button 外层，由 Button onClick 打开
+        btnProps.onClick = function () { setPopOpen(true); };
+      }
 
-        // 兜底：新窗口被拦截，退回到 console + alert
-        console.log('[' + PLUGIN_NAME + '] ctx.data probe:', JSON.stringify(flat, null, 2));
-        alert(detail);
-      },
+      var buttonNode = Button
+        ? React.createElement(Button, btnProps)
+        : React.createElement("button", {
+            onClick: btnProps.onClick,
+            style: { background: "none", border: "none", cursor: "pointer", padding: 4 },
+          }, iconNode);
+
+      var node = buttonNode;
+
+      if (cfg.confirm && Popconfirm) {
+        node = React.createElement(Popconfirm, {
+          title: cfg.confirm,
+          open: popOpen,
+          onOpenChange: function (v) { if (!loading) setPopOpen(v); },
+          onConfirm: run,
+          okText: "确认",
+          cancelText: "取消",
+          okButtonProps: cfg.danger ? { danger: true } : undefined,
+        }, buttonNode);
+      }
+
+      if (Tooltip && cfg.title) {
+        node = React.createElement(Tooltip, { title: cfg.title }, node);
+      }
+      return node;
     };
   }
 
-  /**
-   * 转义 HTML 特殊字符，防止注入
-   * @param {string} str - 原始字符串
-   * @returns {string} 转义后的字符串
-   */
+  // ── 各操作按钮 ───────────────────────────────────────────
+
+  function apiPathFor(sessionId, suffix) {
+    return API_PREFIX + "/session/" + encodeURIComponent(sessionId) + suffix;
+  }
+
+  function doUndo(sessionId, snapshotId) {
+    callApi("POST", apiPathFor(sessionId, "/undo"), { snapshot_id: snapshotId || "" })
+      .then(function (r) {
+        if (r && r.success) {
+          toast("↩️ 已还原到操作前状态", "success");
+          scheduleReload({ sessionId: sessionId });
+        } else {
+          toast("还原失败: " + errText(r, "未知错误"), "error");
+        }
+      });
+  }
+
+  function rewindButton() {
+    return {
+      id: GROUP + ".rewind",
+      render: makeButton({
+        title: "回退：删除这条消息及之后所有（可撤销）",
+        confirm: "删除这条消息之后的全部内容？",
+        icon: "RollbackOutlined",
+        fallbackEmoji: "⏪",
+        action: function (args, done) {
+          var sid = getSessionId();
+          if (!sid) { toast("无法获取会话 ID", "error"); done(); return; }
+          var p = { created_at: args.locator.created_at, original_id: args.locator.original_id,
+                    message_text: args.locator.message_text, role: args.locator.role };
+          callApi("POST", apiPathFor(sid, "/rewind"), p).then(function (r) {
+            done();
+            if (r && r.success) {
+              scheduleReload({
+                sessionId: sid,
+                text: r.rewound_message || "",
+                notify: {
+                  title: "⏪ 已回退 " + r.deleted + " 条",
+                  desc: r.rewound_message ? "本轮提问已放回输入框" : "会话已刷新",
+                  undoId: r.undo_id || "",
+                },
+              });
+            } else {
+              toast("回退失败: " + errText(r, "未知错误"), "error");
+            }
+          });
+        },
+      }),
+    };
+  }
+
+  function forkButton() {
+    return {
+      id: GROUP + ".fork",
+      render: makeButton({
+        title: "分叉：从这条消息（含）复制出新会话",
+        confirm: "从此处分叉一个新会话？",
+        icon: "ForkOutlined",
+        fallbackEmoji: "🍴",
+        action: function (args, done) {
+          var sid = getSessionId();
+          if (!sid) { toast("无法获取会话 ID", "error"); done(); return; }
+          var p = { created_at: args.locator.created_at, original_id: args.locator.original_id,
+                    message_text: args.locator.message_text, role: args.locator.role };
+          callApi("POST", apiPathFor(sid, "/fork"), p).then(function (r) {
+            done();
+            if (r && r.success) {
+              if (r.registered) {
+                // 硬刷新让侧栏列表重新拉取（含新会话），刷新后再跳转
+                scheduleReload({
+                  sessionId: sid,
+                  navigateTo: r.new_session_id,
+                  notify: { title: "🍴 已分叉: " + r.session_name, desc: "已跳转到新会话", undoId: "" },
+                });
+              } else {
+                notifySuccess("🍴 已分叉: " + r.session_name,
+                  "⚠️ 未能注册到会话列表，请手动打开: " + (r.session_path || r.new_session_id));
+              }
+            } else {
+              toast("分叉失败: " + errText(r, "未知错误"), "error");
+            }
+          });
+        },
+      }),
+    };
+  }
+
+  function deleteButton() {
+    return {
+      id: GROUP + ".delete",
+      render: makeButton({
+        title: "删除本轮（提问+回复+工具链，可撤销）",
+        confirm: "删除整轮对话？",
+        icon: "DeleteOutlined",
+        fallbackEmoji: "🗑",
+        action: function (args, done) {
+          var sid = getSessionId();
+          if (!sid) { toast("无法获取会话 ID", "error"); done(); return; }
+          var p = { created_at: args.locator.created_at, original_id: args.locator.original_id,
+                    message_text: args.locator.message_text, role: args.locator.role };
+          callApi("DELETE", apiPathFor(sid, "/message"), p).then(function (r) {
+            done();
+            if (r && r.success) {
+              scheduleReload({
+                sessionId: sid,
+                notify: {
+                  title: "🗑 已删除本轮 " + r.deleted + " 条",
+                  desc: "会话已刷新",
+                  undoId: r.undo_id || "",
+                },
+              });
+            } else {
+              toast("删除失败: " + errText(r, "未知错误"), "error");
+            }
+          });
+        },
+      }),
+    };
+  }
+
+  function withdrawButton() {
+    return {
+      id: GROUP + ".regen",
+      render: makeButton({
+        title: "撤回本轮并编辑：删除本轮提问和回复，原文放回输入框，改完自己发送",
+        confirm: "撤回本轮对话？原文会放进输入框。",
+        icon: "UndoOutlined",
+        fallbackEmoji: "↩",
+        action: function (args, done) {
+          var sid = getSessionId();
+          if (!sid) { toast("无法获取会话 ID", "error"); done(); return; }
+          var p = { created_at: args.locator.created_at, original_id: args.locator.original_id,
+                    message_text: args.locator.message_text, role: args.locator.role };
+          callApi("POST", apiPathFor(sid, "/regen"), p).then(function (r) {
+            done();
+            if (r && r.success) {
+              scheduleReload({
+                sessionId: sid,
+                text: r.rewound_message || "",
+                notify: {
+                  title: "↩ 已撤回本轮",
+                  desc: "原提问已放回输入框，改好后手动发送；点撤销可找回原对话",
+                  undoId: r.undo_id || "",
+                },
+              });
+            } else {
+              toast("撤回失败: " + errText(r, "未知错误"), "error");
+            }
+          });
+        },
+      }),
+    };
+  }
+
+  // ── 调试按钮（DEBUG 开关控制） ───────────────────────────
+
   function escapeHtml(str) {
-    var div = document.createElement('div');
+    var div = document.createElement("div");
     div.appendChild(document.createTextNode(str));
     return div.innerHTML;
   }
 
-  /**
-   * 创建图标元素 — 使用 React.createElement 生成 ReactElement
-   * @param {string} emoji - 图标 emoji
-   * @returns {React.ReactElement}
-   */
-  function createIcon(emoji) {
-    var React = window.QwenPaw && window.QwenPaw.host && window.QwenPaw.host.React;
-    if (React) {
-      return React.createElement('span', {
-        style: { fontSize: '14px', lineHeight: '1', cursor: 'pointer' }
-      }, emoji);
-    }
-    // 兜底（不应走到这里）
-    var span = document.createElement("span");
-    span.textContent = emoji;
-    span.style.fontSize = "14px";
-    span.style.lineHeight = "1";
-    span.style.cursor = "pointer";
-    return span;
+  function dumpPage(title, htmlBody) {
+    try {
+      var win = window.open("", "_blank");
+      if (win) {
+        win.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>' +
+          escapeHtml(title) + "</title><style>" +
+          "body{background:#1a1a2e;color:#e0e0e0;font-family:Consolas,monospace;font-size:13px;line-height:1.6;padding:24px;margin:0}" +
+          "pre{white-space:pre-wrap;word-break:break-all;margin:0}h2{color:#ffd700;margin-top:0}</style></head><body>" +
+          "<h2>" + escapeHtml(title) + "</h2><hr style='border-color:#444'>" + htmlBody + "</body></html>");
+        win.document.close();
+        return true;
+      }
+    } catch (_) {}
+    return false;
   }
 
-  // ── 注册按钮 ─────────────────────────────────────────────────────────
+  function inspectButton() {
+    return {
+      id: GROUP + ".inspect",
+      render: makeButton({
+        title: "查看该消息在会话文件中的完整 JSON",
+        icon: "FileSearchOutlined",
+        fallbackEmoji: "📄",
+        alwaysOn: true,
+        action: function (args, done) {
+          var sid = getSessionId();
+          if (!sid) { toast("无法获取会话 ID", "error"); done(); return; }
+          var p = { created_at: args.locator.created_at, original_id: args.locator.original_id,
+                    message_text: args.locator.message_text, role: args.locator.role };
+          callApi("GET", apiPathFor(sid, "/message"), p).then(function (r) {
+            done();
+            if (r && r.success) {
+              var s = JSON.stringify(r.message, null, 2);
+              if (!dumpPage("📄 消息 JSON (index " + r.index + ")", "<pre>" + escapeHtml(s) + "</pre>")) {
+                console.log("[" + GROUP + "] message JSON:", s);
+                toast("JSON 已打印到控制台", "info");
+              }
+            } else {
+              toast("获取失败: " + errText(r, "未知错误"), "error");
+            }
+          });
+        },
+      }),
+    };
+  }
+
+  function deepProbe(data) {
+    var result = {};
+    var seen = new WeakSet();
+    (function walk(obj, prefix) {
+      if (!obj || typeof obj !== "object") { result[prefix] = String(obj); return; }
+      if (seen.has(obj)) { result[prefix] = "[Circular]"; return; }
+      seen.add(obj);
+      Object.keys(obj).forEach(function (k) {
+        var v = obj[k], full = prefix ? prefix + "." + k : k;
+        if (v === null) result[full] = "null";
+        else if (Array.isArray(v)) {
+          result[full] = "Array[" + v.length + "]";
+          if (v.length > 0) walk(v[0], full + "[0]");
+        } else if (typeof v === "object") { result[full] = "object"; walk(v, full); }
+        else result[full] = String(v);
+      });
+    })(data, "");
+    return result;
+  }
+
+  function debugButton() {
+    return {
+      id: GROUP + ".debug",
+      render: makeButton({
+        title: "探测 ctx.data",
+        icon: "BugOutlined",
+        fallbackEmoji: "🔍",
+        alwaysOn: true,
+        action: function (args, done) {
+          var flat = deepProbe(args.data || {});
+          var lines = Object.keys(flat).map(function (k) {
+            return (k || "(data)") + " => " + flat[k];
+          });
+          done();
+          if (!dumpPage("🔍 ctx.data 探测", "<pre>" + escapeHtml(lines.join("\n")) + "</pre>")) {
+            console.log("[" + GROUP + "] ctx.data:", flat);
+            toast("探测结果已打印到控制台", "info");
+          }
+        },
+      }),
+    };
+  }
+
+  // ── 注册 ─────────────────────────────────────────────────
 
   function registerButtons() {
     var chat = window.QwenPaw && window.QwenPaw.chat;
-    if (!chat || !chat.requestActions) {
-      console.warn("[" + PLUGIN_NAME + "] QwenPaw chat API not ready, retrying...");
+    if (!chat || !chat.actions || !chat.requestActions) {
+      console.warn("[" + GROUP + "] chat API not ready, retrying...");
+      setTimeout(registerButtons, 500);
+      return;
+    }
+    if (!host().React) {
+      console.warn("[" + GROUP + "] host.React not ready, retrying...");
       setTimeout(registerButtons, 500);
       return;
     }
 
+    // 刷新后还原待处理状态（回填/撤销通知/跳转 fork）
+    restorePending(consumePending());
+
     try {
-      // 用户消息气泡按钮：⏪ 🍴
-      chat.requestActions.add(PLUGIN_NAME, makeRewindButton());
-      chat.requestActions.add(PLUGIN_NAME, makeForkButton());
+      // 用户气泡：⏪回退 🍴分叉 ↩撤回并编辑 🗑删除本轮
+      chat.requestActions.add(GROUP, rewindButton());
+      chat.requestActions.add(GROUP, forkButton());
+      chat.requestActions.add(GROUP, withdrawButton());
+      chat.requestActions.add(GROUP, deleteButton());
+      // 助手气泡：↩撤回并编辑 🗑删除本轮 ⏪ 🍴
+      chat.actions.add(GROUP, withdrawButton());
+      chat.actions.add(GROUP, deleteButton());
+      chat.actions.add(GROUP, rewindButton());
+      chat.actions.add(GROUP, forkButton());
       if (DEBUG) {
-        chat.requestActions.add(PLUGIN_NAME, makeDebugButton());
-        chat.requestActions.add(PLUGIN_NAME, makeInspectButton());
+        var dbg = [debugButton(), inspectButton()];
+        dbg.forEach(function (b) { chat.requestActions.add(GROUP, b); });
+        dbg.forEach(function (b) { chat.actions.add(GROUP, b); });
       }
-      // 助手消息气泡按钮：🗑 🔄 ⏪ 🍴
-      chat.actions.add(PLUGIN_NAME, makeDeleteButton());
-      chat.actions.add(PLUGIN_NAME, makeRegenButton());
-      chat.actions.add(PLUGIN_NAME, makeRewindButton());
-      chat.actions.add(PLUGIN_NAME, makeForkButton());
-      if (DEBUG) {
-        chat.actions.add(PLUGIN_NAME, makeDebugButton());
-        chat.actions.add(PLUGIN_NAME, makeInspectButton());
-      }
-      console.log("[" + PLUGIN_NAME + "] 按钮注册完成" + (DEBUG ? " (debug 模式)" : ""));
+      console.log("[" + GROUP + "] 按钮注册完成" + (DEBUG ? " (debug)" : ""));
     } catch (e) {
-      console.error("[" + PLUGIN_NAME + "] 注册按钮失败:", e);
+      console.error("[" + GROUP + "] 注册按钮失败:", e);
     }
   }
-
-  // ── 初始化 ───────────────────────────────────────────────────────────
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", registerButtons);
   } else {
     registerButtons();
   }
-
-  // ====================================================================
-  // 以下是被 original_id / created_at 方案替代的旧版文本匹配代码
-  // 全部注释保留，方便以后参考
-  // ====================================================================
-  /*
-  const NEIGHBOR_COUNT = 2;
-
-  function extractBubbleInfo(bubbleEl) {
-    // ... 从 DOM 提取文本、时间、role
-  }
-
-  function collectBubbleAndNeighbors() {
-    // ... 收集当前气泡 + 前后邻居信息
-  }
-
-  function buildApiParams(info, sessionId, userInfo) {
-    // ... 构建包含文本、时间、邻居的 API 参数
-  }
-  */
-
 })();

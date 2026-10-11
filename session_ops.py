@@ -7,6 +7,7 @@
 import json
 import logging
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -699,17 +700,16 @@ class SessionOperator:
         user_id: str,
         channel: str,
         messages: List[Any],
+        expect_count: int | None = None,
     ):
         """更新会话文件中的消息列表。
 
         通过 SafeJSONSession.update_session_state() API 写入，
         自动检测格式，原子写入 + 写入锁保护。
 
-        Args:
-            session_id: 会话 ID
-            user_id: 用户 ID
-            channel: 通道名称
-            messages: 新的消息列表
+        expect_count 不为 None 时做并发校验：写入前重新读一次磁盘，
+        若消息总数 != expect_count，说明「读取→写回」期间 agent 追加了
+        消息，放弃写入抛 SessionChangedError，避免静默覆盖丢消息。
         """
         state = await self.session.get_session_state_dict(
             session_id,
@@ -717,6 +717,18 @@ class SessionOperator:
             channel=channel,
             allow_not_exist=False,
         )
+        if expect_count is not None:
+            fmt_now = self._detect_format(state)
+            current = (
+                state.get("agent", {}).get("memory", {}).get("content", [])
+                if fmt_now == "old"
+                else state.get("agent", {}).get("state", {}).get("context", [])
+            )
+            if len(current) != expect_count:
+                raise SessionChangedError(
+                    f"会话在操作期间被修改（{expect_count} → {len(current)} 条），"
+                    "为避免覆盖新消息已中止写入，请重试"
+                )
         fmt = self._detect_format(state)
         key = self._get_msg_key(fmt)
         await self.session.update_session_state(
@@ -726,3 +738,88 @@ class SessionOperator:
             user_id=user_id,
             channel=channel,
         )
+
+    # ── 快照 / 还原（破坏性操作前的安全网） ────────────────
+
+    BACKUP_ROOT = ".session-tools-pro-backups"
+    BACKUP_KEEP = 20
+
+    def _session_file(self, session_id: str, user_id: str, channel: str) -> Path:
+        """会话文件绝对路径（复用宿主 SafeJSONSession 的路径规则）。"""
+        return Path(self.session._get_save_path(session_id, user_id, channel))
+
+    def _backup_dir(self, session_id: str, user_id: str, channel: str) -> Path:
+        """某会话的快照目录。"""
+        fname = self._session_file(session_id, user_id, channel).name
+        return self.workspace_dir / "sessions" / self.BACKUP_ROOT / channel / fname
+
+    def snapshot(self, session_id: str, user_id: str, channel: str,
+                 op: str = "op") -> str | None:
+        """把会话文件当前内容拷一份，返回快照 ID；备份关闭或文件不存在时返回 None。
+
+        快照 ID 形如 ``20261011T053012.123456-rewind``，前端撤销时回传。
+        """
+        src = self._session_file(session_id, user_id, channel)
+        if not src.exists():
+            return None
+        d = self._backup_dir(session_id, user_id, channel)
+        d.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%dT%H%M%S.%f")
+        snap_id = f"{ts}-{sanitize_filename(op)}"
+        shutil.copy2(src, d / f"{snap_id}.json")
+        self._prune_backups(d)
+        logger.info("snapshot: %s -> %s", src.name, snap_id)
+        return snap_id
+
+    def _prune_backups(self, d: Path) -> None:
+        """只保留最近 BACKUP_KEEP 份快照。"""
+        files = sorted(d.glob("*.json"), key=lambda p: p.name)
+        for old in files[: max(0, len(files) - self.BACKUP_KEEP)]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+    def list_snapshots(self, session_id: str, user_id: str,
+                       channel: str) -> list[str]:
+        d = self._backup_dir(session_id, user_id, channel)
+        if not d.exists():
+            return []
+        return sorted((p.stem for p in d.glob("*.json")), reverse=True)
+
+    def restore(self, session_id: str, user_id: str, channel: str,
+                snap_id: str) -> bool:
+        """还原到指定快照（缺省=最近一份）。成功返回 True。"""
+        d = self._backup_dir(session_id, user_id, channel)
+        if not d.exists():
+            raise FileNotFoundError("没有可还原的快照")
+        if snap_id:
+            target = d / f"{sanitize_filename(snap_id)}.json"
+            if not target.exists():
+                raise FileNotFoundError(f"快照不存在: {snap_id}")
+        else:
+            files = sorted(d.glob("*.json"), key=lambda p: p.name, reverse=True)
+            if not files:
+                raise FileNotFoundError("没有可还原的快照")
+            target = files[0]
+
+        dest = self._session_file(session_id, user_id, channel)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # 还原本身也先备份一次（撤销撤销操作）
+        self.snapshot(session_id, user_id, channel, op="pre-restore")
+        shutil.copy2(target, dest)
+        logger.info("restore: %s <- %s", dest.name, target.name)
+        return True
+
+
+class SessionChangedError(RuntimeError):
+    """会话在「读取→写回」之间被追加/修改（并发写入）。"""
+
+
+def _msg_id_of(msg: Any) -> str:
+    """提取一条消息记录的 id，兼容 [msg_dict, extra] 旧格式。"""
+    if isinstance(msg, list) and msg and isinstance(msg[0], dict):
+        return msg[0].get("id", "")
+    if isinstance(msg, dict):
+        return msg.get("id", "")
+    return ""
