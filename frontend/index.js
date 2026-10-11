@@ -629,11 +629,11 @@
     restorePending(consumePending());
 
     try {
-      // 用户气泡：⏪回退 🍴分叉 ↩撤回并编辑 🗑删除本轮
-      chat.requestActions.add(GROUP, rewindButton());
-      chat.requestActions.add(GROUP, forkButton());
+      // 用户气泡：↩撤回 删除 ⏪回退 🍴分叉（顺序与助手气泡一致，宿主按注册顺序渲染）
       chat.requestActions.add(GROUP, withdrawButton());
       chat.requestActions.add(GROUP, deleteButton());
+      chat.requestActions.add(GROUP, rewindButton());
+      chat.requestActions.add(GROUP, forkButton());
       // 助手气泡：↩撤回并编辑 🗑删除本轮 ⏪ 🍴
       chat.actions.add(GROUP, withdrawButton());
       chat.actions.add(GROUP, deleteButton());
