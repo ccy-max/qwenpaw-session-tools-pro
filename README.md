@@ -1,6 +1,6 @@
 # ⚡ 会话增强 Pro (SessionToolsPro)
 
-> 会话管理增强插件（v3.0.1）｜插件 ID：`session-tools-pro`
+> 会话管理增强插件（v3.0.3）｜插件 ID：`session-tools-pro`
 > 在 QwenPaw 会话里为**每条消息气泡**挂上「撤回 / 删除 / 回退 / 分叉」操作，并补齐 `/undo` 反悔能力——所有破坏性操作**先快照后写入**，误删一键还原，**零重启热安装**。
 >
 > - **本项目基于 [qwenpaw-plugin-session-tools](https://platform.agentscope.io/plugins/qwenpaw-plugin-session-tools)（作者 [one-sixth](https://github.com/one-sixth)，v2.4.0）增强二次开发**，保留原版全部能力，重写前端交互并加固数据安全性，差异见[版本更新摘要](#版本更新摘要)
@@ -59,7 +59,7 @@
 到 [Releases](https://github.com/ccy-max/qwenpaw-session-tools-pro/releases) 下载 `session-tools-pro-v<版本>.zip`：
 
 ```bash
-qwenpaw plugin install ./session-tools-pro-v3.0.1.zip --force
+qwenpaw plugin install ./session-tools-pro-v3.0.3.zip --force
 ```
 
 **方式二：源码目录**
@@ -74,7 +74,7 @@ QwenPaw 运行中会**热加载**（无需重启）。装完**硬刷新控制台
 验证：
 
 ```bash
-qwenpaw plugin list   # 应看到 会话增强 Pro (v3.0.0)
+qwenpaw plugin list   # 应看到 会话增强 Pro (v3.0.3)
 ```
 
 > ⚠️ 若装过上游原版 `qwenpaw-plugin-session-tools`，**必须先卸载**再装本插件——两者 slash 命令（`/rewind` 等）与 HTTP 前缀重叠，共存会注册冲突。
@@ -171,7 +171,12 @@ ctx.data.created_at (Unix 秒)                        → ② 时间匹配（严
 
 ### 刷新与跨刷新状态
 
-破坏性操作后页面**硬刷新**（350ms 延迟）保证 DOM 与文件同步——宿主消息列表是模块私有的 zustand store，插件 API 面无任何写入口，外部改 DOM 会被下次 re-render 复活甚至弄崩 reconciler。刷新会丢失的三样东西经 `sessionStorage` 传递、加载时还原：
+破坏性操作后页面**硬刷新**（350ms 延迟）保证 DOM 与文件同步——宿主消息列表是模块私有的 zustand store，插件 API 面无任何写入口，外部改 DOM 会被下次 re-render 复活甚至弄崩 reconciler。刷新前 `purgeMessageCache` 会先清除两类本地残留，**防止旧气泡活过刷新**：
+
+1. **React 内存消息 store**——从 root fiber 遍历找到挂载 `clearSessionMessages`/`setMessages` 的 Context value，清当前会话缓存与视图
+2. **`localStorage["qwenpaw_pending_user_msg_{chatId}"]`**——宿主把发送中的用户消息持久化在这里，reload 后会恢复成气泡（v3.0.3 修复的「回退后消息删不掉」即源于此）；按 chatId/sessionId 双 key、localStorage + sessionStorage 双存储清除
+
+刷新会丢失的三样东西经 `sessionStorage` 传递、加载时还原：
 
 | 状态 | 还原动作 |
 |------|---------|
@@ -200,6 +205,9 @@ ctx.data.created_at (Unix 秒)                        → ② 时间匹配（严
 **Q：分叉报 `Unexpected token '<'`？**
 v3.0.0 已修复（长文本截断防 URL 超长）。若仍出现，确认前端脚本是新版：硬刷新后 F12 Console 应有 `[SessionToolsPro] 按钮注册完成`。
 
+**Q：回退后那条消息还在、删也删不掉（报定位失败）？**
+v3.0.3 已修复（宿主 localStorage `pending_user_msg` 残留，刷新前自动清除）。若仍出现旧版本行为：F12 → 应用 → 本地存储，删除 `qwenpaw_pending_user_msg_*` 各项即可；或硬刷新后任意执行一次回退/删除操作。
+
 **Q：agent 正在回复时点了按钮会怎样？**
 写入前并发校验发现消息数变了 → 409 中止，你的新消息不会被覆盖，等回复完成后重试即可。
 
@@ -212,6 +220,20 @@ v3.0.0 已修复（长文本截断防 URL 超长）。若仍出现，确认前�
 ---
 
 ## 版本更新摘要
+
+### v3.0.3 (2026-10-11)
+
+- **修复：回退后旧气泡硬刷新仍复活**。真正根因（用户 DevTools 定位）：宿主把发送中的用户消息持久化在 `localStorage["qwenpaw_pending_user_msg_{chatId}"]`，reload 后恢复成气泡——盘上数据已删，气泡却复活且删除按钮 404。`purgeMessageCache` 刷新前同步清除该 key（双存储双 key），并保留 v3.0.2 的 React 内存 store 清理
+
+### v3.0.2 (2026-10-11)
+
+- 新增 `purgeMessageCache`：破坏性操作硬刷新前，从 React root fiber 遍历找到宿主消息 store（`clearSessionMessages`/`setMessages`），先清缓存再 reload，防止旧气泡活过刷新
+
+### v3.0.1 (2026-10-11)
+
+- 新增 `scripts/build_release.py`：构建插件安装包 zip（plugin.json 置于包根，含 README.md / LICENSE / CHANGELOG.md），宿主 `plugin install xxx.zip` 可直接安装
+- 新增 GitHub Actions：推送 `v*` tag 自动构建 zip 并挂载到 GitHub Release（正文 = CHANGELOG.md）
+- 仓库规范化：后端移入 `backend/`、测试移入 `tests/`（宿主嵌套入口原生支持），`dist/` 加入 .gitignore
 
 ### v3.0.0 (2026-10-11) — SessionToolsPro 首个版本（基于上游 v2.4.0）
 
