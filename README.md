@@ -1,6 +1,6 @@
 # ⚡ 会话增强 Pro (SessionToolsPro)
 
-> 会话管理增强插件（v3.0.0）｜插件 ID：`session-tools-pro`
+> 会话管理增强插件（v3.0.1）｜插件 ID：`session-tools-pro`
 > 在 QwenPaw 会话里为**每条消息气泡**挂上「撤回 / 删除 / 回退 / 分叉」操作，并补齐 `/undo` 反悔能力——所有破坏性操作**先快照后写入**，误删一键还原，**零重启热安装**。
 >
 > - **本项目基于 [qwenpaw-plugin-session-tools](https://platform.agentscope.io/plugins/qwenpaw-plugin-session-tools)（作者 [one-sixth](https://github.com/one-sixth)，v2.4.0）增强二次开发**，保留原版全部能力，重写前端交互并加固数据安全性，差异见[版本更新摘要](#版本更新摘要)
@@ -53,6 +53,16 @@
 ---
 
 ## 安装
+
+**方式一：Release 安装包（推荐）**
+
+到 [Releases](https://github.com/ccy-max/qwenpaw-session-tools-pro/releases) 下载 `session-tools-pro-v<版本>.zip`：
+
+```bash
+qwenpaw plugin install ./session-tools-pro-v3.0.1.zip --force
+```
+
+**方式二：源码目录**
 
 ```bash
 git clone https://github.com/ccy-max/qwenpaw-session-tools-pro.git
