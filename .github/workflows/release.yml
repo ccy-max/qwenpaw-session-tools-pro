@@ -24,11 +24,15 @@ jobs:
       - name: Build plugin package (zip)
         run: python scripts/build_release.py "${GITHUB_REF_NAME}"
 
+      # 从 CHANGELOG.md 只提取当前版本的段落，避免 Release 说明连带历史
+      - name: Extract release notes for current version
+        run: python scripts/extract_release_notes.py "${GITHUB_REF_NAME}" > release_notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: SessionToolsPro ${{ github.ref_name }}
-          body_path: CHANGELOG.md
+          body_path: release_notes.md
           files: dist/session-tools-pro-*.zip
           draft: false
           prerelease: false
