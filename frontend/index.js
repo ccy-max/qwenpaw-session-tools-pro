@@ -156,20 +156,53 @@
   var PENDING_TTL = 20000; // 20s 内有效，过期丢弃避免陈旧还原
 
   /**
-   * 清掉宿主内存里的消息缓存（zustand messages store）。
+   * 清掉宿主破坏性操作后的一切本地残留，防止旧气泡活过刷新。
    *
-   * 背景：宿主把消息放在 React Context（含 setSessionMessages /
-   * clearSessionMessages），location.reload 前如果不清，某些场景下
-   * 内存里的旧气泡能活过刷新（用户实测：回退后"好的"残影）。
-   * 这里从 React 根 fiber 往下找携带 clearSessionMessages 的
-   * Provider value，找到就清当前会话 + 清全局视图，best-effort。
+   * 两个来源（均已实测确认）：
+   * 1. React 内存消息 store（Context value 挂 clearSessionMessages/
+   *    setMessages）——从 root fiber 遍历找到后清空；
+   * 2. localStorage 的 qwenpaw_pending_user_msg_{sessionId}——宿主把
+   *    待确认的用户消息持久化在这里，reload 后会恢复成气泡（这是
+   *    「回退后消息还在、硬刷新也删不掉」的真正根因，BOOS DevTools 定位）。
+   *    key 按 chat_id 存（URL 里的 chatId），当前与目标会话都清。
+   * 全部 best-effort，失败退化为原硬刷新行为。
    */
   function purgeMessageCache(sessionId) {
     try {
+      // ① 清 pending 用户消息（localStorage + sessionStorage 双保险）
+      //    key 是 qwenpaw_pending_user_msg_{chatId}，sessionId 可能是
+      //    chatId 也可能是内部 session_id，都试一遍；再兜底前缀全扫
+      var prefixes = ["qwenpaw_pending_user_msg_"];
+      var sids = [];
+      if (sessionId) sids.push(sessionId);
+      try {
+        var urlChat = window.location.pathname.match(/\/chat\/([^/?#]+)/);
+        if (urlChat && urlChat[1] && sids.indexOf(urlChat[1]) < 0) sids.push(urlChat[1]);
+      } catch (_) {}
+      var stores = [window.localStorage, window.sessionStorage];
+      for (var pi = 0; pi < prefixes.length; pi++) {
+        for (var si = 0; si < sids.length; si++) {
+          for (var st = 0; st < stores.length; st++) {
+            try { stores[st].removeItem(prefixes[pi] + sids[si]); } catch (_) {}
+          }
+        }
+      }
+      // 兜底：凡是 pending_user_msg_ 开头、值里含回退文本的一律清
+      // （保守起见：只清 key 对应当前 chat 前缀的，避免误伤其他标签页）
+      try {
+        var doomed = [];
+        for (var i = 0; i < window.localStorage.length; i++) {
+          var k = window.localStorage.key(i);
+          if (k && k.indexOf("qwenpaw_pending_user_msg_") === 0) doomed.push(k);
+        }
+        // 当前 chat 的已按 id 清过；剩下的属于其他会话，不动
+      } catch (_) {}
+
+      // ② 清 React 内存消息 store
       var rootEl = document.getElementById("root") || document.body.firstElementChild;
       if (!rootEl) return false;
-      var key = Object.keys(rootEl).find(function (k) {
-        return k.indexOf("__reactContainer") === 0 || k.indexOf("__reactFiber") === 0;
+      var key = Object.keys(rootEl).find(function (k2) {
+        return k2.indexOf("__reactContainer") === 0 || k2.indexOf("__reactFiber") === 0;
       });
       if (!key) return false;
 
@@ -183,12 +216,8 @@
           if (v && typeof v.clearSessionMessages === "function" &&
               typeof v.setMessages === "function") {
             try {
-              // 清每个已知会话的缓存 + 当前视图
               v.clearSessionMessages(sessionId || "");
-              if (sessionId && typeof v.getSessionMessages === "function") {
-                // 某些实现 clear 需要逐会话调；把当前缓存里的 session 一并清
-                v.clearSessionMessages(undefined);
-              }
+              v.clearSessionMessages(undefined);
               v.setMessages([]);
               purged = true;
             } catch (_) {}

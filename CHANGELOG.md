@@ -1,5 +1,12 @@
 # 更新日志
 
+## v3.0.3 (2026-10-11)
+- 修复：回退后旧气泡硬刷新仍复活的真正根因——宿主把待确认的用户消息
+  持久化在 localStorage `qwenpaw_pending_user_msg_{chatId}`，reload 后
+  恢复成气泡（由用户 DevTools 定位到）。purgeMessageCache 现在刷新前
+  同步清除该 key（localStorage + sessionStorage，chatId 与 sessionId
+  双 key），React 内存 store 清理保留
+
 ## v3.0.2 (2026-10-11)
 - 修复：回退/删除/撤回后硬刷新仍可能残留旧气泡（宿主内存消息缓存活过 reload）
   —— 新增 purgeMessageCache：刷新前经 React fiber 遍历找到宿主消息 store，
