@@ -1,6 +1,6 @@
 # ⚡ 会话增强 Pro (SessionToolsPro)
 
-> 会话管理增强插件（v3.0.3）｜插件 ID：`session-tools-pro`
+> 会话管理增强插件（v3.0.4）｜插件 ID：`session-tools-pro`
 > 在 QwenPaw 会话里为**每条消息气泡**挂上「撤回 / 删除 / 回退 / 分叉」操作，并补齐 `/undo` 反悔能力——所有破坏性操作**先快照后写入**，误删一键还原，**零重启热安装**。
 >
 > - **本项目基于 [qwenpaw-plugin-session-tools](https://platform.agentscope.io/plugins/qwenpaw-plugin-session-tools)（作者 [one-sixth](https://github.com/one-sixth)，v2.4.0）增强二次开发**，保留原版全部能力，重写前端交互并加固数据安全性，差异见[版本更新摘要](#版本更新摘要)
@@ -59,7 +59,7 @@
 到 [Releases](https://github.com/ccy-max/qwenpaw-session-tools-pro/releases) 下载 `session-tools-pro-v<版本>.zip`：
 
 ```bash
-qwenpaw plugin install ./session-tools-pro-v3.0.3.zip --force
+qwenpaw plugin install ./session-tools-pro-v3.0.4.zip --force
 ```
 
 **方式二：源码目录**
@@ -74,7 +74,7 @@ QwenPaw 运行中会**热加载**（无需重启）。装完**硬刷新控制台
 验证：
 
 ```bash
-qwenpaw plugin list   # 应看到 会话增强 Pro (v3.0.3)
+qwenpaw plugin list   # 应看到 会话增强 Pro (v3.0.4)
 ```
 
 > ⚠️ 若装过上游原版 `qwenpaw-plugin-session-tools`，**必须先卸载**再装本插件——两者 slash 命令（`/rewind` 等）与 HTTP 前缀重叠，共存会注册冲突。
@@ -94,7 +94,7 @@ qwenpaw plugin uninstall session-tools-pro
 1. 硬刷新控制台，任意消息气泡下方出现 4 个操作图标
 2. 点击后弹 **Popconfirm 内联确认**（防误触），确认后执行
 3. 操作完成 → 页面自动刷新同步（宿主消息 store 为私有 React 状态，刷新是唯一可靠同步手段，见[常见问题](#常见问题)）
-4. 右下角通知带 **「撤销」按钮**：点一下即还原到操作前快照（12 秒内有效；过期可用 `/undo`）
+4. 右上角通知带 **「撤销」按钮**：点一下即还原到操作前快照（12 秒内有效；过期可用 `/undo`）
 5. 撤回/回退后，本轮原提问已**回填输入框**，改完手动发送即可
 
 ## 控制台命令
@@ -220,6 +220,11 @@ v3.0.3 已修复（宿主 localStorage `pending_user_msg` 残留，刷新前自�
 ---
 
 ## 版本更新摘要
+
+### v3.0.4 (2026-10-11)
+
+- **通知弹窗不再遮挡输入框**：撤销/结果通知从右下角（bottomRight）改到右上角（topRight），不再盖住输入框下方的模型选择、发送等操作栏
+- **弹窗瘦身**：限宽 300px（antd 默认 385px 偏宽），撤销按钮文案精简为「撤销」，撤回描述去掉冗余提示，通知高度约 160px → 132px
 
 ### v3.0.3 (2026-10-11)
 
