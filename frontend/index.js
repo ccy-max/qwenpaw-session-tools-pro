@@ -124,6 +124,7 @@
       description: description || undefined,
       placement: "topRight",
       duration: onUndo ? 12 : 4,
+      style: { width: 300 },
     };
     if (onUndo && Button) {
       opts.btn = React.createElement(Button, {
@@ -134,7 +135,7 @@
           a.notification.destroy("stpro-undo");
           onUndo();
         },
-      }, "撤销（还原快照）");
+      }, "撤销");
       opts.key = "stpro-undo";
     }
     a.notification.open(opts);
@@ -586,7 +587,7 @@
                 text: r.rewound_message || "",
                 notify: {
                   title: "↩ 已撤回本轮",
-                  desc: "原提问已放回输入框，改好后手动发送；点撤销可找回原对话",
+                  desc: "原提问已放回输入框",
                   undoId: r.undo_id || "",
                 },
               });
