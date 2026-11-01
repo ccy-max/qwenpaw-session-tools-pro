@@ -122,7 +122,7 @@
     var opts = {
       message: title,
       description: description || undefined,
-      placement: "bottomRight",
+      placement: "topRight",
       duration: onUndo ? 12 : 4,
     };
     if (onUndo && Button) {
