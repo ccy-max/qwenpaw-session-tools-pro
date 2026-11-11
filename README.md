@@ -1,6 +1,6 @@
 # ⚡ 会话增强 Pro (SessionToolsPro)
 
-> 会话管理增强插件（v3.0.4）｜插件 ID：`session-tools-pro`
+> 会话管理增强插件（v3.0.5）｜插件 ID：`session-tools-pro`
 > 在 QwenPaw 会话里为**每条消息气泡**挂上「撤回 / 删除 / 回退 / 分叉」操作，并补齐 `/undo` 反悔能力——所有破坏性操作**先快照后写入**，误删一键还原，**零重启热安装**。
 >
 > - **本项目基于 [qwenpaw-plugin-session-tools](https://platform.agentscope.io/plugins/qwenpaw-plugin-session-tools)（作者 [one-sixth](https://github.com/one-sixth)，v2.4.0）增强二次开发**，保留原版全部能力，重写前端交互并加固数据安全性，差异见[版本更新摘要](#版本更新摘要)
@@ -59,7 +59,7 @@
 到 [Releases](https://github.com/ccy-max/qwenpaw-session-tools-pro/releases) 下载 `session-tools-pro-v<版本>.zip`：
 
 ```bash
-qwenpaw plugin install ./session-tools-pro-v3.0.4.zip --force
+qwenpaw plugin install ./session-tools-pro-v3.0.5.zip --force
 ```
 
 **方式二：源码目录**
@@ -74,7 +74,7 @@ QwenPaw 运行中会**热加载**（无需重启）。装完**硬刷新控制台
 验证：
 
 ```bash
-qwenpaw plugin list   # 应看到 会话增强 Pro (v3.0.4)
+qwenpaw plugin list   # 应看到 会话增强 Pro (v3.0.5)
 ```
 
 > ⚠️ 若装过上游原版 `qwenpaw-plugin-session-tools`，**必须先卸载**再装本插件——两者 slash 命令（`/rewind` 等）与 HTTP 前缀重叠，共存会注册冲突。
@@ -220,6 +220,11 @@ v3.0.3 已修复（宿主 localStorage `pending_user_msg` 残留，刷新前自�
 ---
 
 ## 版本更新摘要
+
+### v3.0.5 (2026-10-11)
+
+- **通知弹窗自动关闭倒计时**：右上角显示「Ns 后自动关闭」每秒递减，到点自动消失；倒计时由插件接管（antd duration 悬浮会暂停、与显示脱节），点撤销/关闭 X 会清理定时器
+
 
 ### v3.0.4 (2026-10-11)
 

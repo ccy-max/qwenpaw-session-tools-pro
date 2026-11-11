@@ -113,32 +113,67 @@
     console.log("[" + GROUP + "] " + (type || "info") + ": " + text);
   }
 
-  /** 成功通知，可带「撤销」按钮 */
+  /**
+   * 成功通知，可带「撤销」按钮，并显示自动关闭倒计时。
+   *
+   * 倒计时说明：antd notification 的 duration 会在鼠标悬浮时暂停关闭，
+   * 若用它驱动关闭、再用 setInterval 显示秒数，两者会脱节。所以这里
+   * 禁用 duration（设 0 永不自动关），改用自己的 setInterval 每秒递减
+   * 并原地更新（同 key open 即更新），到 0 手动 destroy——倒计时显示
+   * 的就是真实剩余时间。点撤销/点关闭 X 都会清理定时器。
+   */
   function notifySuccess(title, description, onUndo) {
     var a = antd();
     if (!a.notification || !a.notification.open) { toast(title + (description ? " — " + description : ""), "success"); return; }
     var React = h();
     var Button = a.Button;
-    var opts = {
-      message: title,
-      description: description || undefined,
-      placement: "topRight",
-      duration: onUndo ? 12 : 4,
-      style: { width: 300 },
-    };
-    if (onUndo && Button) {
-      opts.btn = React.createElement(Button, {
-        size: "small",
-        danger: true,
-        type: "primary",
-        onClick: function () {
-          a.notification.destroy("stpro-undo");
-          onUndo();
-        },
-      }, "撤销");
-      opts.key = "stpro-undo";
+    var total = onUndo ? 12 : 4;
+    var key = onUndo ? "stpro-undo" : "stpro-notify-" + Date.now();
+    var remaining = total;
+    var closed = false;
+    var timer = null;
+
+    function stop() {
+      if (closed) return;
+      closed = true;
+      if (timer) { clearInterval(timer); timer = null; }
     }
-    a.notification.open(opts);
+    function close() {
+      stop();
+      try { a.notification.destroy(key); } catch (_) {}
+    }
+    function buildDesc() {
+      var cd = remaining + "s 后自动关闭";
+      return description ? description + "（" + cd + "）" : cd;
+    }
+    function buildOpts() {
+      var opts = {
+        key: key,
+        message: title,
+        description: buildDesc(),
+        placement: "topRight",
+        duration: 0,                 // 关闭由 setInterval 全权接管
+        style: { width: 300 },
+        onClose: stop,               // 用户点 X 时清理定时器
+      };
+      if (onUndo && Button) {
+        opts.btn = React.createElement(Button, {
+          size: "small",
+          danger: true,
+          type: "primary",
+          onClick: function () { close(); onUndo(); },
+        }, "撤销");
+      }
+      return opts;
+    }
+
+    a.notification.open(buildOpts());
+    timer = setInterval(function () {
+      if (closed) return;
+      remaining -= 1;
+      if (remaining <= 0) { close(); return; }
+      a.notification.open(buildOpts());   // 同 key open = 原地更新文案
+    }, 1000);
   }
 
   function errText(result, fallback) {
