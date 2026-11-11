@@ -224,6 +224,7 @@ v3.0.3 已修复（宿主 localStorage `pending_user_msg` 残留，刷新前自�
 ### v3.0.5 (2026-10-11)
 
 - **通知弹窗自动关闭倒计时**：右上角显示「Ns 后自动关闭」每秒递减，到点自动消失；倒计时由插件接管（antd duration 悬浮会暂停、与显示脱节），点撤销/关闭 X 会清理定时器
+- **倒计时 ≤6s 秒数标红加粗**（#ff4d4f + 600 字重），制造末段紧迫感；自动验证用 aria-label 区分 `stpro-countdown-red` / `stpro-countdown-normal`
 
 
 ### v3.0.4 (2026-10-11)
