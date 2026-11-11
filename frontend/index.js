@@ -143,8 +143,20 @@
       try { a.notification.destroy(key); } catch (_) {}
     }
     function buildDesc() {
-      var cd = remaining + "s 后自动关闭";
-      return description ? description + "（" + cd + "）" : cd;
+      // 秒数 ≤6 时标红制造"危机感"；aria-label 供自动化验证/无障碍
+      var cd = React.createElement(
+        "span",
+        {
+          style: { color: remaining <= 6 ? "#ff4d4f" : "inherit", fontWeight: remaining <= 6 ? 600 : "inherit" },
+          "aria-label": remaining <= 6 ? "stpro-countdown-red" : "stpro-countdown-normal",
+        },
+        remaining + "s"
+      );
+      var tail = " 后自动关闭";
+      if (!description) {
+        return React.createElement("span", null, cd, tail);
+      }
+      return React.createElement("span", null, description, "（", cd, tail, "）");
     }
     function buildOpts() {
       var opts = {
